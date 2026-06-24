@@ -415,6 +415,17 @@ InstanceState* GetInstanceState(TRITONBACKEND_ModelInstance* instance)
     return reinterpret_cast<InstanceState*>(state);
 }
 
+fs::path ResolveAtlasDir(const fs::path& repository_location, uint64_t version)
+{
+    const fs::path versioned_atlas_dir =
+        repository_location / std::to_string(version) / "atlas";
+    if (fs::exists(versioned_atlas_dir))
+        return versioned_atlas_dir;
+
+    const fs::path direct_atlas_dir = repository_location / "atlas";
+    return direct_atlas_dir;
+}
+
 TRITONSERVER_Error* ReadImageTensor(TRITONBACKEND_Request* request,
                                     uint32_t& width,
                                     uint32_t& height,
@@ -678,15 +689,23 @@ TRITONSERVER_Error* TRITONBACKEND_ModelInitialize(TRITONBACKEND_Model* model)
     const char* name = nullptr;
     RETURN_IF_ERROR(TRITONBACKEND_ModelName(model, &name));
 
+    TRITONBACKEND_ArtifactType artifact_type = TRITONBACKEND_ARTIFACT_FILESYSTEM;
     const char* repository_path = nullptr;
-    RETURN_IF_ERROR(TRITONBACKEND_ModelRepositoryPath(model, &repository_path));
+    RETURN_IF_ERROR(
+        TRITONBACKEND_ModelRepository(model, &artifact_type, &repository_path));
 
-    int64_t version = 0;
+    if (artifact_type != TRITONBACKEND_ARTIFACT_FILESYSTEM)
+    {
+        return BackendError(TRITONSERVER_ERROR_UNSUPPORTED,
+                            "text_renderer Triton backend only supports filesystem model artifacts");
+    }
+
+    uint64_t version = 0;
     RETURN_IF_ERROR(TRITONBACKEND_ModelVersion(model, &version));
 
     auto state = std::make_shared<ModelState>();
     state->name = name != nullptr ? name : kBackendName;
-    state->atlas_dir = fs::path(repository_path) / std::to_string(version) / "atlas";
+    state->atlas_dir = ResolveAtlasDir(fs::path(repository_path), version);
 
     auto* boxed_state = new std::shared_ptr<ModelState>(std::move(state));
     RETURN_IF_ERROR(TRITONBACKEND_ModelSetState(model, boxed_state));
