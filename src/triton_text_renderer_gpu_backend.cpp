@@ -351,22 +351,30 @@ TRITONSERVER_Error* ReadImageTensor(TRITONBACKEND_Request* request,
                             "input_images must have TYPE_UINT8");
     }
 
-    if (dims_count != 3
-        || shape[0] != (int64_t)kExpectedHeight
-        || shape[1] != (int64_t)kExpectedWidth
-        || shape[2] != 3)
+    const bool has_request_batch_dim =
+        dims_count == 4
+        && shape[0] == 1
+        && shape[1] == (int64_t)kExpectedHeight
+        && shape[2] == (int64_t)kExpectedWidth
+        && shape[3] == 3;
+    const bool has_unbatched_shape =
+        dims_count == 3
+        && shape[0] == (int64_t)kExpectedHeight
+        && shape[1] == (int64_t)kExpectedWidth
+        && shape[2] == 3;
+    if (!has_request_batch_dim && !has_unbatched_shape)
     {
         return BackendError(TRITONSERVER_ERROR_INVALID_ARG,
-                            "input_images must have shape [1200, 900, 3]");
+                            "input_images must have shape [1, 1200, 900, 3]");
     }
 
-    height = (uint32_t)shape[0];
-    width = (uint32_t)shape[1];
+    height = kExpectedHeight;
+    width = kExpectedWidth;
     const std::size_t expected_size = (std::size_t)width * height * 3u;
     if (byte_size != expected_size)
     {
         return BackendError(TRITONSERVER_ERROR_INVALID_ARG,
-                            "input_images byte size does not match shape [1200, 900, 3]");
+                            "input_images byte size does not match shape [1, 1200, 900, 3]");
     }
 
     TRITONSERVER_MemoryType memory_type = TRITONSERVER_MEMORY_CPU;
@@ -425,18 +433,13 @@ TRITONSERVER_Error* ReadCommandVersion(TRITONBACKEND_Request* request,
     RETURN_IF_ERROR(ReadNumericTensor(
         request, kInputCommandVersionName, TRITONSERVER_TYPE_INT32, values, &shape));
 
-    if (shape.empty())
-    {
-        if (values.size() != 1u)
-        {
-            return BackendError(TRITONSERVER_ERROR_INVALID_ARG,
-                                "command_version scalar must contain exactly one value");
-        }
-    }
-    else if (!(shape.size() == 1 && shape[0] == 1))
+    const bool is_scalar = shape.empty();
+    const bool is_unbatched_vector = shape.size() == 1 && shape[0] == 1;
+    const bool is_batched_scalar = shape.size() == 2 && shape[0] == 1 && shape[1] == 1;
+    if (!is_scalar && !is_unbatched_vector && !is_batched_scalar)
     {
         return BackendError(TRITONSERVER_ERROR_INVALID_ARG,
-                            "command_version must be a scalar or shape [1]");
+                            "command_version must have shape [1, 1]");
     }
 
     if (values.size() != 1u)
@@ -475,19 +478,25 @@ TRITONSERVER_Error* PrepareRequest(TRITONBACKEND_Request* request,
     std::vector<int64_t> shape;
     RETURN_IF_ERROR(ReadNumericTensor(
         request, kInputCommandBytesName, TRITONSERVER_TYPE_UINT8, command_bytes, &shape));
-    if (shape.size() != 1 || shape[0] < 0)
+    const bool has_unbatched_command_shape = shape.size() == 1 && shape[0] >= 0;
+    const bool has_batched_command_shape =
+        shape.size() == 2 && shape[0] == 1 && shape[1] >= 0;
+    if (!has_unbatched_command_shape && !has_batched_command_shape)
     {
         return BackendError(TRITONSERVER_ERROR_INVALID_ARG,
-                            "command_bytes must have shape [N]");
+                            "command_bytes must have shape [1, N]");
     }
 
     std::vector<uint8_t> batch_bytes;
     RETURN_IF_ERROR(ReadNumericTensor(
         request, kInputBatchBytesName, TRITONSERVER_TYPE_UINT8, batch_bytes, &shape));
-    if (shape.size() != 1 || shape[0] < 0)
+    const bool has_unbatched_batch_shape = shape.size() == 1 && shape[0] >= 0;
+    const bool has_batched_batch_shape =
+        shape.size() == 2 && shape[0] == 1 && shape[1] >= 0;
+    if (!has_unbatched_batch_shape && !has_batched_batch_shape)
     {
         return BackendError(TRITONSERVER_ERROR_INVALID_ARG,
-                            "batch_bytes must have shape [N]");
+                            "batch_bytes must have shape [1, N]");
     }
 
     GpuCommandBufferV2 buffer;
@@ -560,14 +569,15 @@ TRITONSERVER_Error* SendRenderedResponse(TRITONBACKEND_Request* request,
     TRITONBACKEND_Response* response = nullptr;
     RETURN_IF_ERROR(TRITONBACKEND_ResponseNew(&response, request));
 
-    const int64_t output_shape[3] = {
+    const int64_t output_shape[4] = {
+        1,
         (int64_t)kExpectedHeight,
         (int64_t)kExpectedWidth,
         3,
     };
     TRITONBACKEND_Output* output = nullptr;
     RETURN_IF_ERROR(TRITONBACKEND_ResponseOutput(
-        response, &output, kOutputImagesName, TRITONSERVER_TYPE_UINT8, output_shape, 3));
+        response, &output, kOutputImagesName, TRITONSERVER_TYPE_UINT8, output_shape, 4));
 
     TRITONSERVER_MemoryType output_memory_type = TRITONSERVER_MEMORY_CPU;
     int64_t output_memory_id = device_id;

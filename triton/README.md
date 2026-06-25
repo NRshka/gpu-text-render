@@ -66,6 +66,18 @@ The packed command ABI is versioned and validated in-process:
 - every command `image_index` must be `< 1` for a single request
 - every batch range must stay within the flattened command buffer
 
+Because `max_batch_size > 0`, Triton inference requests must include the
+leading batch dimension. In practice the client sends:
+
+- `input_images`: shape `[ 1, 1200, 900, 3 ]`
+- `command_version`: shape `[ 1, 1 ]`
+- `command_bytes`: shape `[ 1, N ]`
+- `batch_bytes`: shape `[ 1, N ]`
+
+The benchmark script handles this automatically. The backend still treats each
+request as one logical image and flattens multiple Triton requests during
+execution.
+
 The shared planner-side helpers now live in the normal C++ API:
 
 - `BuildLumaRenderRequest(...)`
@@ -156,3 +168,49 @@ When Triton backend build support is enabled, CMake now produces:
 - packed command payloads must be built by a trusted planner using the same ABI
 - each request must carry a single-image command buffer; explicit multi-image payloads are no longer the Triton contract
 - the repo still uses the current codepoint/atlas pipeline and does not add a shaping engine
+
+## Async Benchmark
+
+The repo now includes an async gRPC throughput benchmark for the dynamic-batch
+GPU path:
+
+```bash
+python3 reference/benchmark_text_renderer_gpu_async.py \
+  --url localhost:8001 \
+  --model-name text_renderer_gpu \
+  --concurrency 16 \
+  --duration 15
+```
+
+By default this sends synthetic `[1200, 900, 3]` images with empty
+`command_bytes` and `batch_bytes`. That is useful for measuring request
+overhead, scheduler behavior, and dynamic batching without needing a planner.
+The script automatically wraps each tensor with batch size `1` when sending the
+request to Triton.
+
+To replay real planner output, provide one or more payload files:
+
+```bash
+python3 reference/benchmark_text_renderer_gpu_async.py \
+  --url localhost:8001 \
+  --request-npz /path/to/request0.npz \
+  --request-npz /path/to/request1.npz \
+  --concurrency 16 \
+  --duration 15
+```
+
+Each `.npz` file must contain:
+
+- `input_images`
+- `command_version`
+- `command_bytes`
+- `batch_bytes`
+
+You can also point the benchmark at directories containing:
+
+- `image.npy`
+- `command_bytes.bin`
+- `batch_bytes.bin`
+- optional `command_version.txt` or `command_version.npy`
+
+For dynamic batching measurements, use `--concurrency` greater than `1`.

@@ -19,11 +19,13 @@ input [
     name: "command_bytes"
     data_type: TYPE_UINT8
     dims: [ -1 ]
+    allow_ragged_batch: true
   },
   {
     name: "batch_bytes"
     data_type: TYPE_UINT8
     dims: [ -1 ]
+    allow_ragged_batch: true
   }
 ]
 
