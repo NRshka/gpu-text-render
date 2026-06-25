@@ -10,7 +10,7 @@ cmake -S . -B build \
   -DGPU_FONT_BUILD_TRITON_BACKEND=ON \
   -DGPU_FONT_BUILD_PYTHON_PLANNER=ON \
   -DTRITON_BACKEND_INCLUDE_DIR=/opt/tritonserver/include
-cmake --build build --target text_renderer text_renderer_gpu font_asset_compiler gpu_font_planner
+cmake --build build --target text_renderer text_renderer_gpu font_asset_compiler gpu_font_planner test_render_request test_gpu_command_buffer
 ```
 
 `TRITON_BACKEND_INCLUDE_DIR` should normally be the include root, not the

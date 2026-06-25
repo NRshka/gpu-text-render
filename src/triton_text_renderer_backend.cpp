@@ -8,6 +8,7 @@
 #include <cuda_runtime_api.h>
 #include <triton/core/tritonbackend.h>
 
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
@@ -47,6 +48,45 @@ TRITONSERVER_Error* BackendError(TRITONSERVER_Error_Code code,
                                  const std::string& message)
 {
     return TRITONSERVER_ErrorNew(code, message.c_str());
+}
+
+uint64_t NowNs() noexcept
+{
+    using namespace std::chrono;
+    return (uint64_t)duration_cast<nanoseconds>(
+               steady_clock::now().time_since_epoch())
+        .count();
+}
+
+void DeleteError(TRITONSERVER_Error* err) noexcept
+{
+    if (err != nullptr)
+        TRITONSERVER_ErrorDelete(err);
+}
+
+void ReportRequestStatistics(TRITONBACKEND_ModelInstance* instance,
+                             TRITONBACKEND_Request* request,
+                             bool success,
+                             uint64_t exec_start_ns,
+                             uint64_t compute_start_ns,
+                             uint64_t compute_end_ns,
+                             uint64_t exec_end_ns) noexcept
+{
+    DeleteError(TRITONBACKEND_ModelInstanceReportStatistics(
+        instance, request, success, exec_start_ns, compute_start_ns, compute_end_ns,
+        exec_end_ns));
+}
+
+void ReportBatchStatistics(TRITONBACKEND_ModelInstance* instance,
+                           uint64_t batch_size,
+                           uint64_t exec_start_ns,
+                           uint64_t compute_start_ns,
+                           uint64_t compute_end_ns,
+                           uint64_t exec_end_ns) noexcept
+{
+    DeleteError(TRITONBACKEND_ModelInstanceReportBatchStatistics(
+        instance, batch_size, exec_start_ns, compute_start_ns, compute_end_ns,
+        exec_end_ns));
 }
 
 template <typename T>
@@ -773,8 +813,10 @@ TRITONSERVER_Error* TRITONBACKEND_ModelInstanceExecute(
     using namespace fac::triton_backend;
 
     InstanceState* state = GetInstanceState(instance);
+    const uint64_t exec_start_ns = NowNs();
     for (uint32_t i = 0; i < request_count; ++i)
     {
+        const uint64_t request_exec_start_ns = NowNs();
         TRITONSERVER_Error* err = nullptr;
         try
         {
@@ -793,10 +835,17 @@ TRITONSERVER_Error* TRITONBACKEND_ModelInstanceExecute(
                 response, TRITONSERVER_RESPONSE_COMPLETE_FINAL, err);
         }
 
+        const uint64_t request_exec_end_ns = NowNs();
+        ReportRequestStatistics(instance, requests[i], err == nullptr,
+                                request_exec_start_ns, request_exec_start_ns,
+                                request_exec_end_ns, request_exec_end_ns);
         TRITONBACKEND_RequestRelease(
             requests[i], TRITONSERVER_REQUEST_RELEASE_ALL);
     }
 
+    const uint64_t exec_end_ns = NowNs();
+    ReportBatchStatistics(instance, (uint64_t)request_count, exec_start_ns, exec_start_ns,
+                          exec_end_ns, exec_end_ns);
     return nullptr;
 }
 
