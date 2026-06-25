@@ -1,8 +1,11 @@
 name: "text_renderer_gpu"
 backend: "text_renderer_gpu"
-max_batch_size: 8
+max_batch_size: 16
 
-dynamic_batching {}
+dynamic_batching {
+  preferred_batch_size: [ 4, 8, 16 ]
+  max_queue_delay_microseconds: 2000
+}
 
 input [
   {

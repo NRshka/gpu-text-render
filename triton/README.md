@@ -8,8 +8,9 @@ sudo apt-get install -y libfreetype-dev nlohmann-json3-dev cmake libwebp-dev
 
 cmake -S . -B build \
   -DGPU_FONT_BUILD_TRITON_BACKEND=ON \
+  -DGPU_FONT_BUILD_PYTHON_PLANNER=ON \
   -DTRITON_BACKEND_INCLUDE_DIR=/opt/tritonserver/include
-cmake --build build --target text_renderer text_renderer_gpu font_asset_compiler
+cmake --build build --target text_renderer text_renderer_gpu font_asset_compiler gpu_font_planner
 ```
 
 `TRITON_BACKEND_INCLUDE_DIR` should normally be the include root, not the
@@ -88,6 +89,29 @@ The shared planner-side helpers now live in the normal C++ API:
 These helpers preserve the current brightness-based auto-color rule by
 planning from a single-channel luma image where `luma = (R + G + B) / 3`.
 
+## Python Planner Bridge
+
+For maximum-throughput Python services, build the optional `pybind11` planner
+module:
+
+```bash
+python3 -m pip install pybind11
+
+cmake -S . -B build \
+  -DGPU_FONT_BUILD_PYTHON_PLANNER=ON
+cmake --build build --target gpu_font_planner
+
+export PYTHONPATH="$PWD/build/python:$PYTHONPATH"
+```
+
+The module exposes:
+
+- `gpu_font_planner.GpuRenderPlanner(atlas_dir)`
+- `planner.plan(image_rgb, texts, polygons, original_texts=None, rgba=None)`
+
+`plan(...)` returns `(command_bytes, batch_bytes)` for exactly one logical image
+and always serializes commands with `image_index == 0`.
+
 ## Recommended Deployment Shape
 
 For correctness work, debugging, or ad hoc integration:
@@ -141,7 +165,8 @@ The intended production flow is:
 
 `text_renderer_gpu`
 
-- Triton config uses `max_batch_size: 8` plus `dynamic_batching {}`
+- Triton config uses `max_batch_size: 16`
+- Triton dynamic batching prefers `[4, 8, 16]` and waits up to `2000` us
 - one Triton request contains exactly one image and one command payload
 - Triton may pass multiple requests to one execute call
 - the backend combines those requests into one contiguous image batch
@@ -168,6 +193,60 @@ When Triton backend build support is enabled, CMake now produces:
 - packed command payloads must be built by a trusted planner using the same ABI
 - each request must carry a single-image command buffer; explicit multi-image payloads are no longer the Triton contract
 - the repo still uses the current codepoint/atlas pipeline and does not add a shaping engine
+
+## FastAPI Example
+
+The repo does not ship a FastAPI app, but the intended worker-local setup is:
+
+```python
+import asyncio
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+from gpu_font_planner import GpuRenderPlanner
+
+from reference.triton_text_renderer import (
+    DEFAULT_TEXT_RENDERER_GPU_MAX_INFLIGHT,
+    TritonTextRendererGpuClient,
+    plan_and_infer_text_renderer_gpu,
+)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    app.state.planner = GpuRenderPlanner("/path/to/atlas")
+    app.state.triton = TritonTextRendererGpuClient(url="localhost:8001")
+    app.state.render_sem = asyncio.Semaphore(DEFAULT_TEXT_RENDERER_GPU_MAX_INFLIGHT)
+    try:
+        yield
+    finally:
+        await app.state.triton.close()
+
+
+app = FastAPI(lifespan=lifespan)
+
+
+@app.post("/render")
+async def render(payload: dict):
+    async with app.state.render_sem:
+        rendered = await plan_and_infer_text_renderer_gpu(
+            planner=app.state.planner,
+            triton_client=app.state.triton,
+            input_image=payload["image_rgb"],
+            texts=payload["texts"],
+            polygons=payload["polygons"],
+            original_texts=payload.get("original_texts"),
+            rgba=payload.get("rgba"),
+        )
+    return {"image_rgb": rendered}
+```
+
+Notes:
+
+- create one `GpuRenderPlanner` per worker process and reuse it
+- create one async Triton client per worker and reuse it
+- send one image per Triton request; do not manually batch in FastAPI
+- use `text_renderer` only for correctness/debug or direct polygon-text serving
 
 ## Async Benchmark
 

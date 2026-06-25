@@ -12,8 +12,11 @@ set(GPU_FONT_CUDA_ARCHITECTURES "75;80;86;89;90"
 set(CMAKE_CUDA_ARCHITECTURES ${GPU_FONT_CUDA_ARCHITECTURES})
 
 option(GPU_FONT_BUILD_TRITON_BACKEND "Build the optional Triton backend shared library" OFF)
+option(GPU_FONT_BUILD_PYTHON_PLANNER "Build the optional Python planner extension module" OFF)
 set(TRITON_BACKEND_INCLUDE_DIR ""
     CACHE PATH "Directory containing Triton backend API headers")
+
+enable_testing()
 
 # ── Dependencies ──────────────────────────────────────────────────────────────
 
@@ -162,6 +165,43 @@ target_compile_options(test_gpu_device PRIVATE -Wall -Wextra -O2)
 add_executable(test_gpu_renderer_cuda tests/test_gpu_renderer_cuda.cpp)
 target_link_libraries(test_gpu_renderer_cuda PRIVATE gpu_renderer_cuda text_renderer_cpu)
 target_compile_options(test_gpu_renderer_cuda PRIVATE -Wall -Wextra -O2)
+
+if (GPU_FONT_BUILD_PYTHON_PLANNER)
+    find_package(Python3 COMPONENTS Interpreter Development.Module REQUIRED)
+
+    execute_process(
+        COMMAND "${Python3_EXECUTABLE}" -m pybind11 --cmakedir
+        RESULT_VARIABLE PYBIND11_CMAKEDIR_RESULT
+        OUTPUT_VARIABLE PYBIND11_CMAKEDIR
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    if (PYBIND11_CMAKEDIR_RESULT EQUAL 0 AND EXISTS "${PYBIND11_CMAKEDIR}")
+        list(APPEND CMAKE_PREFIX_PATH "${PYBIND11_CMAKEDIR}")
+    endif()
+
+    find_package(pybind11 CONFIG REQUIRED)
+
+    pybind11_add_module(gpu_font_planner
+        src/python_gpu_font_planner.cpp
+    )
+    target_include_directories(gpu_font_planner PRIVATE include)
+    target_link_libraries(gpu_font_planner PRIVATE render_request)
+    target_compile_options(gpu_font_planner PRIVATE -Wall -Wextra -O2)
+    set_target_properties(gpu_font_planner PROPERTIES
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/python"
+        OUTPUT_NAME "gpu_font_planner"
+    )
+
+    add_test(
+        NAME test_gpu_font_planner_python
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/test_gpu_font_planner.py"
+    )
+    set_tests_properties(test_gpu_font_planner_python PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}/python:$ENV{PYTHONPATH}"
+    )
+endif()
 
 if (GPU_FONT_BUILD_TRITON_BACKEND)
     if (TRITON_BACKEND_INCLUDE_DIR STREQUAL "")

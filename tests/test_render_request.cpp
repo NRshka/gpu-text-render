@@ -242,6 +242,30 @@ int main()
         EXPECT(planned.command_buffer.commands.size() == 1u);
         EXPECT(planned.command_buffer.commands[0].image_index == 3u);
         EXPECT(planned.command_buffer.commands[0].rgba == 0xFFFFFFFFu);
+
+        const GpuCommandBufferV2 indexed_image = DeserializeGpuCommandBufferV2(
+            planned.command_bytes.data(),
+            planned.command_bytes.size(),
+            planned.batch_bytes.data(),
+            planned.batch_bytes.size(),
+            4u);
+        EXPECT(indexed_image.total_images == 4u);
+        EXPECT(indexed_image.commands.size() == 1u);
+        EXPECT(indexed_image.batches.size() == 1u);
+        EXPECT(indexed_image.commands[0].image_index == 3u);
+
+        const PlannedGpuRenderRequest planned_single =
+            BuildPlannedGpuRenderRequest(db, request, 0u);
+        const GpuCommandBufferV2 single_image = DeserializeGpuCommandBufferV2(
+            planned_single.command_bytes.data(),
+            planned_single.command_bytes.size(),
+            planned_single.batch_bytes.data(),
+            planned_single.batch_bytes.size(),
+            1u);
+        EXPECT(single_image.total_images == 1u);
+        EXPECT(single_image.commands.size() == 1u);
+        EXPECT(single_image.batches.size() == 1u);
+        EXPECT(single_image.commands[0].image_index == 0u);
     }
 
     std::cout << "\n────────────────────────────────\n";
