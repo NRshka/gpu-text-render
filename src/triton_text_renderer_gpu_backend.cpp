@@ -30,6 +30,8 @@ constexpr const char* kInputBatchBytesName = "batch_bytes";
 constexpr const char* kOutputImagesName = "rendered_image";
 constexpr uint32_t kExpectedHeight = 1200;
 constexpr uint32_t kExpectedWidth = 900;
+constexpr std::size_t kImageRgbBytes =
+    (std::size_t)kExpectedWidth * kExpectedHeight * 3u;
 
 #define RETURN_IF_ERROR(EXPR)            \
     do {                                 \
@@ -42,6 +44,12 @@ TRITONSERVER_Error* BackendError(TRITONSERVER_Error_Code code,
                                  const std::string& message)
 {
     return TRITONSERVER_ErrorNew(code, message.c_str());
+}
+
+bool IsHostMemoryType(TRITONSERVER_MemoryType memory_type) noexcept
+{
+    return memory_type == TRITONSERVER_MEMORY_CPU
+        || memory_type == TRITONSERVER_MEMORY_CPU_PINNED;
 }
 
 template <typename T>
@@ -60,7 +68,7 @@ TRITONSERVER_Error* CopyBufferToHost(const void* src,
     if (byte_size == 0)
         return nullptr;
 
-    if (memory_type == TRITONSERVER_MEMORY_CPU)
+    if (IsHostMemoryType(memory_type))
     {
         std::memcpy(out.data(), src, byte_size);
         return nullptr;
@@ -73,6 +81,36 @@ TRITONSERVER_Error* CopyBufferToHost(const void* src,
         {
             return BackendError(TRITONSERVER_ERROR_INTERNAL,
                                 std::string("cudaMemcpy device->host failed: ")
+                                    + cudaGetErrorString(err));
+        }
+        return nullptr;
+    }
+
+    return BackendError(TRITONSERVER_ERROR_UNSUPPORTED,
+                        "unsupported Triton memory type");
+}
+
+TRITONSERVER_Error* CopyHostToBuffer(const uint8_t* src,
+                                     std::size_t byte_size,
+                                     TRITONSERVER_MemoryType memory_type,
+                                     void* dst)
+{
+    if (byte_size == 0)
+        return nullptr;
+
+    if (IsHostMemoryType(memory_type))
+    {
+        std::memcpy(dst, src, byte_size);
+        return nullptr;
+    }
+
+    if (memory_type == TRITONSERVER_MEMORY_GPU)
+    {
+        cudaError_t err = cudaMemcpy(dst, src, byte_size, cudaMemcpyHostToDevice);
+        if (err != cudaSuccess)
+        {
+            return BackendError(TRITONSERVER_ERROR_INTERNAL,
+                                std::string("cudaMemcpy host->device failed: ")
                                     + cudaGetErrorString(err));
         }
         return nullptr;
@@ -138,7 +176,7 @@ TRITONSERVER_Error* CollectTensorBytes(TRITONBACKEND_Input* input,
             input, i, &buffer, &chunk_size, &memory_type, &memory_id));
         (void)memory_id;
 
-        if (memory_type == TRITONSERVER_MEMORY_CPU)
+        if (IsHostMemoryType(memory_type))
         {
             const uint8_t* bytes = reinterpret_cast<const uint8_t*>(buffer);
             out.insert(out.end(), bytes, bytes + chunk_size);
@@ -270,13 +308,28 @@ fs::path ResolveAtlasDir(const fs::path& repository_location, uint64_t version)
     return direct_atlas_dir;
 }
 
-TRITONSERVER_Error* ReadImageBatchTensor(TRITONBACKEND_Request* request,
-                                         uint32_t& batch_size,
-                                         uint32_t& width,
-                                         uint32_t& height,
-                                         const uint8_t*& input_ptr,
-                                         GpuBufferMemoryType& input_memory,
-                                         std::vector<uint8_t>& host_fallback)
+struct PreparedRequest
+{
+    TRITONBACKEND_Request* request = nullptr;
+    GpuCommandBufferV2 command_buffer;
+};
+
+TRITONSERVER_Error* SendErrorResponse(TRITONBACKEND_Request* request,
+                                      TRITONSERVER_Error* err)
+{
+    TRITONBACKEND_Response* response = nullptr;
+    RETURN_IF_ERROR(TRITONBACKEND_ResponseNew(&response, request));
+    RETURN_IF_ERROR(
+        TRITONBACKEND_ResponseSend(response, TRITONSERVER_RESPONSE_COMPLETE_FINAL, err));
+    return nullptr;
+}
+
+TRITONSERVER_Error* ReadImageTensor(TRITONBACKEND_Request* request,
+                                    uint32_t& width,
+                                    uint32_t& height,
+                                    const uint8_t*& input_ptr,
+                                    GpuBufferMemoryType& input_memory,
+                                    std::vector<uint8_t>& host_fallback)
 {
     TRITONBACKEND_Input* input = nullptr;
     RETURN_IF_ERROR(TRITONBACKEND_RequestInput(request, kInputImagesName, &input));
@@ -298,24 +351,22 @@ TRITONSERVER_Error* ReadImageBatchTensor(TRITONBACKEND_Request* request,
                             "input_images must have TYPE_UINT8");
     }
 
-    if (dims_count != 4
-        || shape[0] <= 0
-        || shape[1] != (int64_t)kExpectedHeight
-        || shape[2] != (int64_t)kExpectedWidth
-        || shape[3] != 3)
+    if (dims_count != 3
+        || shape[0] != (int64_t)kExpectedHeight
+        || shape[1] != (int64_t)kExpectedWidth
+        || shape[2] != 3)
     {
         return BackendError(TRITONSERVER_ERROR_INVALID_ARG,
-                            "input_images must have shape [B, 1200, 900, 3]");
+                            "input_images must have shape [1200, 900, 3]");
     }
 
-    batch_size = (uint32_t)shape[0];
-    height = (uint32_t)shape[1];
-    width = (uint32_t)shape[2];
-    const std::size_t expected_size = (std::size_t)batch_size * width * height * 3u;
+    height = (uint32_t)shape[0];
+    width = (uint32_t)shape[1];
+    const std::size_t expected_size = (std::size_t)width * height * 3u;
     if (byte_size != expected_size)
     {
         return BackendError(TRITONSERVER_ERROR_INVALID_ARG,
-                            "input_images byte size does not match shape [B, 1200, 900, 3]");
+                            "input_images byte size does not match shape [1200, 900, 3]");
     }
 
     TRITONSERVER_MemoryType memory_type = TRITONSERVER_MEMORY_CPU;
@@ -336,6 +387,33 @@ TRITONSERVER_Error* ReadImageBatchTensor(TRITONBACKEND_Request* request,
     input_memory = (memory_type == TRITONSERVER_MEMORY_GPU)
         ? GpuBufferMemoryType::Device
         : GpuBufferMemoryType::Host;
+    return nullptr;
+}
+
+TRITONSERVER_Error* AppendImageBytes(const uint8_t* src,
+                                     GpuBufferMemoryType input_memory,
+                                     std::vector<uint8_t>& combined_input)
+{
+    const std::size_t old_size = combined_input.size();
+    combined_input.resize(old_size + kImageRgbBytes);
+
+    if (input_memory == GpuBufferMemoryType::Host)
+    {
+        std::memcpy(combined_input.data() + old_size, src, kImageRgbBytes);
+        return nullptr;
+    }
+
+    cudaError_t err = cudaMemcpy(combined_input.data() + old_size,
+                                 src,
+                                 kImageRgbBytes,
+                                 cudaMemcpyDeviceToHost);
+    if (err != cudaSuccess)
+    {
+        return BackendError(TRITONSERVER_ERROR_INTERNAL,
+                            std::string("cudaMemcpy device->host failed: ")
+                                + cudaGetErrorString(err));
+    }
+
     return nullptr;
 }
 
@@ -371,17 +449,19 @@ TRITONSERVER_Error* ReadCommandVersion(TRITONBACKEND_Request* request,
     return nullptr;
 }
 
-TRITONSERVER_Error* ProcessRequest(InstanceState& instance_state,
-                                   TRITONBACKEND_Request* request)
+TRITONSERVER_Error* PrepareRequest(TRITONBACKEND_Request* request,
+                                   PreparedRequest& prepared,
+                                   std::vector<uint8_t>& combined_input)
 {
-    uint32_t batch_size = 0;
     uint32_t width = 0;
     uint32_t height = 0;
     const uint8_t* input_rgb = nullptr;
     GpuBufferMemoryType input_memory = GpuBufferMemoryType::Host;
     std::vector<uint8_t> host_image;
-    RETURN_IF_ERROR(ReadImageBatchTensor(
-        request, batch_size, width, height, input_rgb, input_memory, host_image));
+    RETURN_IF_ERROR(ReadImageTensor(
+        request, width, height, input_rgb, input_memory, host_image));
+    (void)width;
+    (void)height;
 
     int32_t command_version = 0;
     RETURN_IF_ERROR(ReadCommandVersion(request, command_version));
@@ -417,50 +497,90 @@ TRITONSERVER_Error* ProcessRequest(InstanceState& instance_state,
                                                command_bytes.size(),
                                                batch_bytes.data(),
                                                batch_bytes.size(),
-                                               batch_size);
+                                               1);
     }
     catch (const std::exception& e)
     {
         return BackendError(TRITONSERVER_ERROR_INVALID_ARG, e.what());
     }
 
+    RETURN_IF_ERROR(AppendImageBytes(input_rgb, input_memory, combined_input));
+    prepared.request = request;
+    prepared.command_buffer = std::move(buffer);
+    return nullptr;
+}
+
+TRITONSERVER_Error* RenderPreparedBatch(InstanceState& instance_state,
+                                        const std::vector<PreparedRequest>& prepared_requests,
+                                        const std::vector<uint8_t>& combined_input,
+                                        std::vector<uint8_t>& combined_output)
+{
+    if (prepared_requests.empty())
+        return nullptr;
+
+    std::vector<GpuCommandBufferV2> buffers;
+    buffers.reserve(prepared_requests.size());
+    for (const PreparedRequest& prepared : prepared_requests)
+        buffers.push_back(prepared.command_buffer);
+
+    GpuCommandBufferV2 combined_buffer;
+    try
+    {
+        combined_buffer = CombineGpuCommandBuffersV2(buffers);
+    }
+    catch (const std::exception& e)
+    {
+        return BackendError(TRITONSERVER_ERROR_INVALID_ARG, e.what());
+    }
+
+    const uint32_t batch_size = (uint32_t)prepared_requests.size();
+    if (combined_input.size() != (std::size_t)batch_size * kImageRgbBytes)
+    {
+        return BackendError(TRITONSERVER_ERROR_INTERNAL,
+                            "prepared input batch size does not match the number of requests");
+    }
+
+    combined_output.resize((std::size_t)batch_size * kImageRgbBytes);
+    instance_state.renderer.RenderRgbBatch(combined_output.data(),
+                                           GpuBufferMemoryType::Host,
+                                           combined_input.data(),
+                                           GpuBufferMemoryType::Host,
+                                           batch_size,
+                                           kExpectedWidth,
+                                           kExpectedHeight,
+                                           instance_state.atlas_manager,
+                                           combined_buffer);
+    return nullptr;
+}
+
+TRITONSERVER_Error* SendRenderedResponse(TRITONBACKEND_Request* request,
+                                         int device_id,
+                                         const uint8_t* output_slice)
+{
     TRITONBACKEND_Response* response = nullptr;
     RETURN_IF_ERROR(TRITONBACKEND_ResponseNew(&response, request));
 
-    const int64_t output_shape[4] = {
-        (int64_t)batch_size,
-        (int64_t)height,
-        (int64_t)width,
+    const int64_t output_shape[3] = {
+        (int64_t)kExpectedHeight,
+        (int64_t)kExpectedWidth,
         3,
     };
     TRITONBACKEND_Output* output = nullptr;
     RETURN_IF_ERROR(TRITONBACKEND_ResponseOutput(
-        response, &output, kOutputImagesName, TRITONSERVER_TYPE_UINT8, output_shape, 4));
+        response, &output, kOutputImagesName, TRITONSERVER_TYPE_UINT8, output_shape, 3));
 
-    TRITONSERVER_MemoryType output_memory_type = TRITONSERVER_MEMORY_GPU;
-    int64_t output_memory_id = instance_state.device_id;
+    TRITONSERVER_MemoryType output_memory_type = TRITONSERVER_MEMORY_CPU;
+    int64_t output_memory_id = device_id;
     void* output_buffer = nullptr;
     RETURN_IF_ERROR(TRITONBACKEND_OutputBuffer(
         output,
         &output_buffer,
-        (uint64_t)batch_size * width * height * 3u,
+        (uint64_t)kImageRgbBytes,
         &output_memory_type,
         &output_memory_id));
 
-    const GpuBufferMemoryType render_output_memory =
-        (output_memory_type == TRITONSERVER_MEMORY_GPU)
-            ? GpuBufferMemoryType::Device
-            : GpuBufferMemoryType::Host;
-
-    instance_state.renderer.RenderRgbBatch(reinterpret_cast<uint8_t*>(output_buffer),
-                                           render_output_memory,
-                                           input_rgb,
-                                           input_memory,
-                                           batch_size,
-                                           width,
-                                           height,
-                                           instance_state.atlas_manager,
-                                           buffer);
+    RETURN_IF_ERROR(CopyHostToBuffer(
+        output_slice, kImageRgbBytes, output_memory_type, output_buffer));
 
     RETURN_IF_ERROR(
         TRITONBACKEND_ResponseSend(response, TRITONSERVER_RESPONSE_COMPLETE_FINAL, nullptr));
@@ -576,12 +696,20 @@ TRITONSERVER_Error* TRITONBACKEND_ModelInstanceExecute(
     using namespace fac::triton_gpu_backend;
 
     InstanceState* state = GetInstanceState(instance);
+    std::vector<PreparedRequest> prepared_requests;
+    prepared_requests.reserve(request_count);
+    std::vector<uint8_t> combined_input;
+    combined_input.reserve((std::size_t)request_count * kImageRgbBytes);
+
     for (uint32_t i = 0; i < request_count; ++i)
     {
         TRITONSERVER_Error* err = nullptr;
         try
         {
-            err = ProcessRequest(*state, requests[i]);
+            PreparedRequest prepared;
+            err = PrepareRequest(requests[i], prepared, combined_input);
+            if (err == nullptr)
+                prepared_requests.push_back(std::move(prepared));
         }
         catch (const std::exception& e)
         {
@@ -590,15 +718,64 @@ TRITONSERVER_Error* TRITONBACKEND_ModelInstanceExecute(
 
         if (err != nullptr)
         {
-            TRITONBACKEND_Response* response = nullptr;
-            TRITONBACKEND_ResponseNew(&response, requests[i]);
-            TRITONBACKEND_ResponseSend(
-                response, TRITONSERVER_RESPONSE_COMPLETE_FINAL, err);
+            TRITONSERVER_Error* response_err = SendErrorResponse(requests[i], err);
+            if (response_err != nullptr)
+                TRITONSERVER_ErrorDelete(response_err);
+            TRITONBACKEND_RequestRelease(
+                requests[i], TRITONSERVER_REQUEST_RELEASE_ALL);
+        }
+    }
+
+    if (prepared_requests.empty())
+        return nullptr;
+
+    TRITONSERVER_Error* batch_err = nullptr;
+    std::vector<uint8_t> combined_output;
+    try
+    {
+        batch_err = RenderPreparedBatch(
+            *state, prepared_requests, combined_input, combined_output);
+    }
+    catch (const std::exception& e)
+    {
+        batch_err = BackendError(TRITONSERVER_ERROR_INTERNAL, e.what());
+    }
+
+    for (std::size_t i = 0; i < prepared_requests.size(); ++i)
+    {
+        TRITONBACKEND_Request* request = prepared_requests[i].request;
+        TRITONSERVER_Error* err = batch_err;
+        if (err == nullptr)
+        {
+            const uint8_t* output_slice =
+                combined_output.data() + i * kImageRgbBytes;
+            try
+            {
+                err = SendRenderedResponse(request, state->device_id, output_slice);
+            }
+            catch (const std::exception& e)
+            {
+                err = BackendError(TRITONSERVER_ERROR_INTERNAL, e.what());
+            }
+        }
+        else
+        {
+            err = BackendError(TRITONSERVER_ErrorCode(batch_err),
+                               TRITONSERVER_ErrorMessage(batch_err));
         }
 
-        TRITONBACKEND_RequestRelease(
-            requests[i], TRITONSERVER_REQUEST_RELEASE_ALL);
+        if (err != nullptr)
+        {
+            TRITONSERVER_Error* response_err = SendErrorResponse(request, err);
+            if (response_err != nullptr)
+                TRITONSERVER_ErrorDelete(response_err);
+        }
+
+        TRITONBACKEND_RequestRelease(request, TRITONSERVER_REQUEST_RELEASE_ALL);
     }
+
+    if (batch_err != nullptr)
+        TRITONSERVER_ErrorDelete(batch_err);
 
     return nullptr;
 }

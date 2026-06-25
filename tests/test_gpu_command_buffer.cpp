@@ -234,6 +234,66 @@ int main()
         EXPECT_NEAR(roundtrip.commands[1].m01, -0.75f, 1e-6f);
     }
 
+    SECTION("Combine prebuilt GPU command buffers v2");
+    {
+        RenderPlan plan_a;
+        plan_a.total_regions = 1;
+        plan_a.fitted_regions = 1;
+        plan_a.total_glyphs = 1;
+
+        RenderBatch batch_a;
+        batch_a.atlas_render_size = 16;
+        RenderGlyph glyph_a;
+        glyph_a.atlas_codepoint = 'A';
+        glyph_a.origin_x = 7.0f;
+        glyph_a.origin_y = 9.0f;
+        glyph_a.basis_ux = 1.0f;
+        glyph_a.basis_uy = 0.0f;
+        glyph_a.basis_vx = 0.0f;
+        glyph_a.basis_vy = 1.0f;
+        glyph_a.scale = 1.0f;
+        glyph_a.rgba = 0x55667788u;
+        batch_a.glyphs.push_back(glyph_a);
+        plan_a.batches.push_back(batch_a);
+
+        RenderPlan plan_b;
+        plan_b.total_regions = 1;
+        plan_b.fitted_regions = 1;
+        plan_b.total_glyphs = 1;
+
+        RenderBatch batch_b;
+        batch_b.atlas_render_size = 32;
+        RenderGlyph glyph_b;
+        glyph_b.atlas_codepoint = 0x10D0u;
+        glyph_b.origin_x = 17.0f;
+        glyph_b.origin_y = 19.0f;
+        glyph_b.basis_ux = 1.0f;
+        glyph_b.basis_uy = 0.0f;
+        glyph_b.basis_vx = 0.0f;
+        glyph_b.basis_vy = 1.0f;
+        glyph_b.scale = 2.0f;
+        glyph_b.rgba = 0x99AABBCCu;
+        batch_b.glyphs.push_back(glyph_b);
+        plan_b.batches.push_back(batch_b);
+
+        const GpuCommandBufferV2 single_a = BuildGpuCommandBufferV2(db, plan_a, 0);
+        const GpuCommandBufferV2 single_b = BuildGpuCommandBufferV2(db, plan_b, 0);
+        const GpuCommandBufferV2 combined =
+            CombineGpuCommandBuffersV2({single_a, single_b});
+
+        EXPECT(combined.total_images == 2u);
+        EXPECT(combined.total_regions == 2u);
+        EXPECT(combined.total_glyphs == 2u);
+        EXPECT(combined.batches.size() == 2u);
+        EXPECT(combined.commands.size() == 2u);
+        EXPECT(combined.commands[0].image_index == 0u);
+        EXPECT(combined.commands[1].image_index == 1u);
+        EXPECT(combined.batches[0].command_count == 1u);
+        EXPECT(combined.batches[1].command_count == 1u);
+        EXPECT(combined.batches[0].atlas_render_size == 16u);
+        EXPECT(combined.batches[1].atlas_render_size == 32u);
+    }
+
     std::cout << "\n────────────────────────────────\n";
     std::cout << "Passed: " << g_passed << "\n";
     std::cout << "Failed: " << g_failed << "\n";

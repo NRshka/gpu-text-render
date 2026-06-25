@@ -101,6 +101,9 @@ GpuCommandBufferV2 BuildCombinedGpuCommandBufferV2(
     const FontDatabase& db,
     const std::vector<RenderPlan>& plans);
 
+GpuCommandBufferV2 CombineGpuCommandBuffersV2(
+    const std::vector<GpuCommandBufferV2>& buffers);
+
 std::vector<uint8_t> SerializeGpuRenderCommandsV2(
     const std::vector<GpuRenderCommandV2>& commands);
 

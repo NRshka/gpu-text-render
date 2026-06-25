@@ -1,12 +1,14 @@
 name: "text_renderer_gpu"
 backend: "text_renderer_gpu"
-max_batch_size: 0
+max_batch_size: 8
+
+dynamic_batching {}
 
 input [
   {
     name: "input_images"
     data_type: TYPE_UINT8
-    dims: [ -1, 1200, 900, 3 ]
+    dims: [ 1200, 900, 3 ]
   },
   {
     name: "command_version"
@@ -29,7 +31,7 @@ output [
   {
     name: "rendered_image"
     data_type: TYPE_UINT8
-    dims: [ -1, 1200, 900, 3 ]
+    dims: [ 1200, 900, 3 ]
   }
 ]
 

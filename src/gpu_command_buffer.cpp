@@ -171,6 +171,19 @@ GpuCommandBufferV2 BuildCombinedGpuCommandBufferV2(
     const FontDatabase& db,
     const std::vector<RenderPlan>& plans)
 {
+    std::vector<GpuCommandBufferV2> buffers;
+    buffers.reserve(plans.size());
+    for (const RenderPlan& plan : plans)
+    {
+        buffers.push_back(BuildGpuCommandBufferV2(db, plan, 0));
+    }
+
+    return CombineGpuCommandBuffersV2(buffers);
+}
+
+GpuCommandBufferV2 CombineGpuCommandBuffersV2(
+    const std::vector<GpuCommandBufferV2>& buffers)
+{
     struct BatchBucket
     {
         GpuRenderBatchV2 batch;
@@ -178,20 +191,20 @@ GpuCommandBufferV2 BuildCombinedGpuCommandBufferV2(
     };
 
     GpuCommandBufferV2 out;
-    out.total_images = (uint32_t)plans.size();
+    uint32_t image_base = 0;
 
     std::vector<BatchBucket> buckets;
     std::vector<uint32_t> atlas_order;
     std::unordered_map<uint32_t, std::size_t> atlas_to_bucket;
 
-    for (std::size_t image_index = 0; image_index < plans.size(); ++image_index)
+    for (const GpuCommandBufferV2& buffer : buffers)
     {
-        const GpuCommandBufferV2 single =
-            BuildGpuCommandBufferV2(db, plans[image_index], (uint32_t)image_index);
-        out.total_regions += single.total_regions;
-        out.total_glyphs += single.total_glyphs;
+        ValidateGpuCommandBufferV2(buffer, buffer.total_images);
+        out.total_images += buffer.total_images;
+        out.total_regions += buffer.total_regions;
+        out.total_glyphs += buffer.total_glyphs;
 
-        for (const GpuRenderBatchV2& batch : single.batches)
+        for (const GpuRenderBatchV2& batch : buffer.batches)
         {
             auto it = atlas_to_bucket.find(batch.atlas_render_size);
             if (it == atlas_to_bucket.end())
@@ -208,10 +221,16 @@ GpuCommandBufferV2 BuildCombinedGpuCommandBufferV2(
             BatchBucket& bucket = buckets[it->second];
             const std::size_t begin = batch.command_offset;
             const std::size_t end = begin + batch.command_count;
-            bucket.commands.insert(bucket.commands.end(),
-                                   single.commands.begin() + (std::ptrdiff_t)begin,
-                                   single.commands.begin() + (std::ptrdiff_t)end);
+            bucket.commands.reserve(bucket.commands.size() + batch.command_count);
+            for (std::size_t command_index = begin; command_index < end; ++command_index)
+            {
+                GpuRenderCommandV2 command = buffer.commands[command_index];
+                command.image_index += image_base;
+                bucket.commands.push_back(command);
+            }
         }
+
+        image_base += buffer.total_images;
     }
 
     out.batches.reserve(atlas_order.size());
