@@ -291,6 +291,101 @@ int main()
         }
     }
 
+    SECTION("GPU batched RGB pipeline matches per-image CPU results");
+    {
+        if (!HasCudaDevice())
+        {
+            std::cout << "  No CUDA device available, skipping\n";
+            EXPECT(true);
+        }
+        else
+        {
+            const fs::path dir =
+                fs::temp_directory_path() / "gpu_font_rendering_tests" / "gpu_renderer_cuda_batch";
+            fs::create_directories(dir);
+
+            const fs::path atlas_path = dir / "atlas_16.bin";
+            WriteRendererTestAtlas(atlas_path);
+
+            FontDatabase db;
+            db.LoadAtlas(atlas_path);
+
+            TextRegion region_a;
+            region_a.text = "A";
+            region_a.original_text = "A";
+            region_a.rgba = 0xFFFFFFFFu;
+            region_a.box.cx = 8.0f;
+            region_a.box.cy = 8.0f;
+            region_a.box.width = 8.0f;
+            region_a.box.height = 8.0f;
+
+            TextRegion region_b;
+            region_b.text = u8"Aა";
+            region_b.original_text = u8"Aა";
+            region_b.rgba = 0x00FF00FFu;
+            region_b.box.cx = 8.0f;
+            region_b.box.cy = 8.0f;
+            region_b.box.width = 10.0f;
+            region_b.box.height = 8.0f;
+
+            const ImageRgba8 base_a(16, 16, 0x101010FFu);
+            const ImageRgba8 base_b(16, 16, 0x203040FFu);
+            const RenderPlan plan_a =
+                BuildRenderPlan(db, base_a, std::vector<TextRegion>{region_a});
+            const RenderPlan plan_b =
+                BuildRenderPlan(db, base_b, std::vector<TextRegion>{region_b});
+
+            ImageRgba8 cpu_a = base_a;
+            ImageRgba8 cpu_b = base_b;
+            RenderPlanCpu(cpu_a, db, plan_a);
+            RenderPlanCpu(cpu_b, db, plan_b);
+
+            std::vector<uint8_t> rgb_in(2u * 16u * 16u * 3u, 0u);
+            std::vector<uint8_t> rgb_out(rgb_in.size(), 0u);
+            std::vector<uint8_t> rgb_cpu(rgb_in.size(), 0u);
+
+            for (uint32_t image_index = 0; image_index < 2u; ++image_index)
+            {
+                const ImageRgba8& base = (image_index == 0u) ? base_a : base_b;
+                const ImageRgba8& cpu = (image_index == 0u) ? cpu_a : cpu_b;
+                const std::size_t image_offset = (std::size_t)image_index * 16u * 16u * 3u;
+                for (uint32_t y = 0; y < 16u; ++y)
+                {
+                    for (uint32_t x = 0; x < 16u; ++x)
+                    {
+                        const std::size_t rgb_idx = image_offset + ((std::size_t)y * 16u + x) * 3u;
+                        const uint8_t* base_pixel = base.PixelPtr(x, y);
+                        const uint8_t* cpu_pixel = cpu.PixelPtr(x, y);
+                        rgb_in[rgb_idx + 0u] = base_pixel[0];
+                        rgb_in[rgb_idx + 1u] = base_pixel[1];
+                        rgb_in[rgb_idx + 2u] = base_pixel[2];
+                        rgb_cpu[rgb_idx + 0u] = cpu_pixel[0];
+                        rgb_cpu[rgb_idx + 1u] = cpu_pixel[1];
+                        rgb_cpu[rgb_idx + 2u] = cpu_pixel[2];
+                    }
+                }
+            }
+
+            GpuAtlasManager atlas_manager;
+            atlas_manager.Upload(db);
+            const GpuCommandBufferV2 buffer =
+                BuildCombinedGpuCommandBufferV2(db, {plan_a, plan_b});
+            const GpuRenderStats stats = RenderCommandBufferCudaRgbBatch(
+                rgb_out.data(),
+                GpuBufferMemoryType::Host,
+                rgb_in.data(),
+                GpuBufferMemoryType::Host,
+                2u,
+                16u,
+                16u,
+                atlas_manager,
+                buffer);
+
+            EXPECT(stats.glyphs_rendered == plan_a.total_glyphs + plan_b.total_glyphs);
+            EXPECT(rgb_out == rgb_cpu);
+        }
+    }
+
     std::cout << "\n────────────────────────────────\n";
     std::cout << "Passed: " << g_passed << "\n";
     std::cout << "Failed: " << g_failed << "\n";

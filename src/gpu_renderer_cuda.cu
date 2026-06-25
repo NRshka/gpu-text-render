@@ -89,7 +89,8 @@ static void EnsureDeviceCapacityVoid(void*& ptr,
     capacity_bytes = required_bytes;
 }
 
-static void EnsurePinnedCommandCapacity(GpuRenderCommand*& ptr,
+template <typename T>
+static void EnsurePinnedCommandCapacity(T*& ptr,
                                         std::size_t& capacity_count,
                                         std::size_t required_count,
                                         const char* context)
@@ -108,7 +109,7 @@ static void EnsurePinnedCommandCapacity(GpuRenderCommand*& ptr,
     }
 
     CheckCuda(cudaHostAlloc((void**)&ptr,
-                            required_count * sizeof(GpuRenderCommand),
+                            required_count * sizeof(T),
                             cudaHostAllocDefault),
               context);
     capacity_count = required_count;
@@ -119,9 +120,10 @@ __device__ static float Clamp01(float v)
     return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
 }
 
+template <typename TCommand>
 __device__ static float FetchGlyphCoverage(const uint8_t* atlas_pixels,
                                            uint32_t atlas_width,
-                                           const GpuRenderCommand& cmd,
+                                           const TCommand& cmd,
                                            int gx,
                                            int gy)
 {
@@ -137,9 +139,10 @@ __device__ static float FetchGlyphCoverage(const uint8_t* atlas_pixels,
     return (float)atlas_pixels[(std::size_t)sy * atlas_width + sx] / 255.0f;
 }
 
+template <typename TCommand>
 __device__ static float SampleGlyphCoverageBilinear(const uint8_t* atlas_pixels,
                                                     uint32_t atlas_width,
-                                                    const GpuRenderCommand& cmd,
+                                                    const TCommand& cmd,
                                                     float local_x,
                                                     float local_y)
 {
@@ -299,6 +302,121 @@ __global__ void RenderGlyphBatchKernel(uchar4* image,
     }
 }
 
+__global__ void RenderGlyphBatchKernelV2(uchar4* image,
+                                         uint32_t image_width,
+                                         uint32_t image_height,
+                                         uint32_t image_stride_pixels,
+                                         const uint8_t* atlas_pixels,
+                                         uint32_t atlas_width,
+                                         const GpuRenderCommandV2* commands,
+                                         uint32_t command_count)
+{
+    const uint32_t cmd_index = blockIdx.x;
+    if (cmd_index >= command_count)
+        return;
+
+    __shared__ GpuRenderCommandV2 cmd;
+    __shared__ int bbox_x0, bbox_y0, bbox_x1, bbox_y1;
+    __shared__ float inv00, inv01, inv10, inv11;
+    __shared__ float src_r, src_g, src_b, src_a_base;
+
+    if (threadIdx.x == 0 && threadIdx.y == 0)
+    {
+        cmd = commands[cmd_index];
+
+        const float det = cmd.m00 * cmd.m11 - cmd.m01 * cmd.m10;
+        inv00 =  cmd.m11 / det;
+        inv01 = -cmd.m01 / det;
+        inv10 = -cmd.m10 / det;
+        inv11 =  cmd.m00 / det;
+
+        float min_x = cmd.origin_x;
+        float max_x = cmd.origin_x;
+        float min_y = cmd.origin_y;
+        float max_y = cmd.origin_y;
+
+        const float w = (float)cmd.atlas_w;
+        const float h = (float)cmd.atlas_h;
+        const float corners[4][2] = {
+            {0.0f, 0.0f},
+            {w,    0.0f},
+            {0.0f, h   },
+            {w,    h   },
+        };
+
+        for (int i = 0; i < 4; ++i)
+        {
+            const float ix = cmd.origin_x + cmd.m00 * corners[i][0] + cmd.m01 * corners[i][1];
+            const float iy = cmd.origin_y + cmd.m10 * corners[i][0] + cmd.m11 * corners[i][1];
+            min_x = fminf(min_x, ix);
+            max_x = fmaxf(max_x, ix);
+            min_y = fminf(min_y, iy);
+            max_y = fmaxf(max_y, iy);
+        }
+
+        bbox_x0 = max(0, (int)floorf(min_x));
+        bbox_y0 = max(0, (int)floorf(min_y));
+        bbox_x1 = min((int)image_width - 1, (int)ceilf(max_x));
+        bbox_y1 = min((int)image_height - 1, (int)ceilf(max_y));
+
+        src_r = (float)((cmd.rgba >> 24) & 0xFFu) / 255.0f;
+        src_g = (float)((cmd.rgba >> 16) & 0xFFu) / 255.0f;
+        src_b = (float)((cmd.rgba >> 8) & 0xFFu) / 255.0f;
+        src_a_base = (float)(cmd.rgba & 0xFFu) / 255.0f;
+    }
+    __syncthreads();
+
+    if (cmd.atlas_w == 0 || cmd.atlas_h == 0)
+        return;
+
+    const std::size_t image_offset = (std::size_t)cmd.image_index * image_stride_pixels;
+
+    for (int y = bbox_y0 + (int)threadIdx.y; y <= bbox_y1; y += blockDim.y)
+    {
+        for (int x = bbox_x0 + (int)threadIdx.x; x <= bbox_x1; x += blockDim.x)
+        {
+            const float dx = (float)x + 0.5f - cmd.origin_x;
+            const float dy = (float)y + 0.5f - cmd.origin_y;
+
+            const float local_x = inv00 * dx + inv01 * dy;
+            const float local_y = inv10 * dx + inv11 * dy;
+
+            if (local_x < 0.0f || local_y < 0.0f
+                || local_x >= (float)cmd.atlas_w
+                || local_y >= (float)cmd.atlas_h)
+            {
+                continue;
+            }
+
+            const float coverage =
+                SampleGlyphCoverageBilinear(atlas_pixels, atlas_width, cmd, local_x, local_y);
+            if (coverage <= 0.0f)
+                continue;
+
+            const float src_a = src_a_base * coverage;
+            const std::size_t pixel_index = image_offset
+                + (std::size_t)y * image_width
+                + (std::size_t)x;
+            uchar4* p = image + pixel_index;
+
+            const float dst_r = (float)p->x / 255.0f;
+            const float dst_g = (float)p->y / 255.0f;
+            const float dst_b = (float)p->z / 255.0f;
+            const float dst_a = (float)p->w / 255.0f;
+
+            const float out_r = src_a * src_r + (1.0f - src_a) * dst_r;
+            const float out_g = src_a * src_g + (1.0f - src_a) * dst_g;
+            const float out_b = src_a * src_b + (1.0f - src_a) * dst_b;
+            const float out_a = src_a + (1.0f - src_a) * dst_a;
+
+            p->x = (uint8_t)lrintf(Clamp01(out_r) * 255.0f);
+            p->y = (uint8_t)lrintf(Clamp01(out_g) * 255.0f);
+            p->z = (uint8_t)lrintf(Clamp01(out_b) * 255.0f);
+            p->w = (uint8_t)lrintf(Clamp01(out_a) * 255.0f);
+        }
+    }
+}
+
 static cudaStream_t SelectStream(void* preferred_stream,
                                  void* owned_stream) noexcept
 {
@@ -323,6 +441,10 @@ GpuRendererCuda::GpuRendererCuda(GpuRendererCuda&& other) noexcept
     , m_device_command_capacity(other.m_device_command_capacity)
     , m_host_command_staging(other.m_host_command_staging)
     , m_host_command_capacity(other.m_host_command_capacity)
+    , m_device_commands_v2(other.m_device_commands_v2)
+    , m_device_command_capacity_v2(other.m_device_command_capacity_v2)
+    , m_host_command_staging_v2(other.m_host_command_staging_v2)
+    , m_host_command_capacity_v2(other.m_host_command_capacity_v2)
     , m_stream(other.m_stream)
 {
     other.m_device_index = -2;
@@ -334,6 +456,10 @@ GpuRendererCuda::GpuRendererCuda(GpuRendererCuda&& other) noexcept
     other.m_device_command_capacity = 0;
     other.m_host_command_staging = nullptr;
     other.m_host_command_capacity = 0;
+    other.m_device_commands_v2 = nullptr;
+    other.m_device_command_capacity_v2 = 0;
+    other.m_host_command_staging_v2 = nullptr;
+    other.m_host_command_capacity_v2 = 0;
     other.m_stream = nullptr;
 }
 
@@ -352,6 +478,10 @@ GpuRendererCuda& GpuRendererCuda::operator=(GpuRendererCuda&& other) noexcept
     m_device_command_capacity = other.m_device_command_capacity;
     m_host_command_staging = other.m_host_command_staging;
     m_host_command_capacity = other.m_host_command_capacity;
+    m_device_commands_v2 = other.m_device_commands_v2;
+    m_device_command_capacity_v2 = other.m_device_command_capacity_v2;
+    m_host_command_staging_v2 = other.m_host_command_staging_v2;
+    m_host_command_capacity_v2 = other.m_host_command_capacity_v2;
     m_stream = other.m_stream;
 
     other.m_device_index = -2;
@@ -363,6 +493,10 @@ GpuRendererCuda& GpuRendererCuda::operator=(GpuRendererCuda&& other) noexcept
     other.m_device_command_capacity = 0;
     other.m_host_command_staging = nullptr;
     other.m_host_command_capacity = 0;
+    other.m_device_commands_v2 = nullptr;
+    other.m_device_command_capacity_v2 = 0;
+    other.m_host_command_staging_v2 = nullptr;
+    other.m_host_command_capacity_v2 = 0;
     other.m_stream = nullptr;
     return *this;
 }
@@ -399,6 +533,10 @@ void GpuRendererCuda::Clear() noexcept
         cudaFree(m_device_commands);
     if (m_host_command_staging)
         cudaFreeHost(m_host_command_staging);
+    if (m_device_commands_v2)
+        cudaFree(m_device_commands_v2);
+    if (m_host_command_staging_v2)
+        cudaFreeHost(m_host_command_staging_v2);
     if (m_stream)
         cudaStreamDestroy(AsStream(m_stream));
 
@@ -410,6 +548,10 @@ void GpuRendererCuda::Clear() noexcept
     m_device_command_capacity = 0;
     m_host_command_staging = nullptr;
     m_host_command_capacity = 0;
+    m_device_commands_v2 = nullptr;
+    m_device_command_capacity_v2 = 0;
+    m_host_command_staging_v2 = nullptr;
+    m_host_command_capacity_v2 = 0;
     m_stream = nullptr;
     m_device_index = -2;
 }
@@ -521,6 +663,140 @@ GpuRenderStats GpuRendererCuda::RenderDeviceRgba(const DeviceRgbaImageView& imag
                   "GpuRendererCuda::RenderDeviceRgba cudaEventRecord kernel_stop");
         CheckCuda(cudaStreamSynchronize(stream),
                   "GpuRendererCuda::RenderDeviceRgba cudaStreamSynchronize");
+
+        if (command_count > 0)
+            RecordElapsed(evt_cmd_start, evt_cmd_stop, stats.command_upload_ms);
+        RecordElapsed(evt_kernel_start, evt_kernel_stop, stats.kernel_ms);
+    }
+    catch (...)
+    {
+        DestroyEvent(evt_cmd_start);
+        DestroyEvent(evt_cmd_stop);
+        DestroyEvent(evt_kernel_start);
+        DestroyEvent(evt_kernel_stop);
+        throw;
+    }
+
+    DestroyEvent(evt_cmd_start);
+    DestroyEvent(evt_cmd_stop);
+    DestroyEvent(evt_kernel_start);
+    DestroyEvent(evt_kernel_stop);
+    return stats;
+}
+
+GpuRenderStats GpuRendererCuda::RenderDeviceRgbaBatch(const DeviceRgbaImageBatchView& image,
+                                                      const GpuAtlasManager& atlas_manager,
+                                                      const GpuCommandBufferV2& buffer,
+                                                      void* stream_ptr)
+{
+    if (!image.IsValid())
+    {
+        throw std::runtime_error(
+            "GpuRendererCuda::RenderDeviceRgbaBatch: image view is invalid");
+    }
+
+    ValidateGpuCommandBufferV2(buffer, image.batch_size);
+    Initialize(m_device_index);
+
+    GpuRenderStats stats;
+    stats.device = QueryCudaDevice(m_device_index);
+    stats.tuning = SelectGpuKernelTuning(stats.device);
+
+    const std::size_t command_count = buffer.commands.size();
+    EnsureDeviceCapacity(m_device_commands_v2,
+                         m_device_command_capacity_v2,
+                         command_count * sizeof(GpuRenderCommandV2),
+                         "GpuRendererCuda::RenderDeviceRgbaBatch cudaMalloc commands");
+    EnsurePinnedCommandCapacity(m_host_command_staging_v2,
+                                m_host_command_capacity_v2,
+                                command_count,
+                                "GpuRendererCuda::RenderDeviceRgbaBatch cudaHostAlloc commands");
+
+    cudaEvent_t evt_cmd_start = nullptr;
+    cudaEvent_t evt_cmd_stop = nullptr;
+    cudaEvent_t evt_kernel_start = nullptr;
+    cudaEvent_t evt_kernel_stop = nullptr;
+
+    try
+    {
+        CheckCuda(cudaEventCreate(&evt_cmd_start),
+                  "GpuRendererCuda::RenderDeviceRgbaBatch cudaEventCreate");
+        CheckCuda(cudaEventCreate(&evt_cmd_stop),
+                  "GpuRendererCuda::RenderDeviceRgbaBatch cudaEventCreate");
+        CheckCuda(cudaEventCreate(&evt_kernel_start),
+                  "GpuRendererCuda::RenderDeviceRgbaBatch cudaEventCreate");
+        CheckCuda(cudaEventCreate(&evt_kernel_stop),
+                  "GpuRendererCuda::RenderDeviceRgbaBatch cudaEventCreate");
+
+        const cudaStream_t stream = SelectStream(stream_ptr, m_stream);
+
+        if (command_count > 0)
+        {
+            std::memcpy(m_host_command_staging_v2,
+                        buffer.commands.data(),
+                        command_count * sizeof(GpuRenderCommandV2));
+
+            CheckCuda(cudaEventRecord(evt_cmd_start, stream),
+                      "GpuRendererCuda::RenderDeviceRgbaBatch cudaEventRecord cmd_start");
+            CheckCuda(cudaMemcpyAsync(m_device_commands_v2,
+                                      m_host_command_staging_v2,
+                                      command_count * sizeof(GpuRenderCommandV2),
+                                      cudaMemcpyHostToDevice,
+                                      stream),
+                      "GpuRendererCuda::RenderDeviceRgbaBatch cudaMemcpyAsync commands");
+            CheckCuda(cudaEventRecord(evt_cmd_stop, stream),
+                      "GpuRendererCuda::RenderDeviceRgbaBatch cudaEventRecord cmd_stop");
+        }
+
+        const dim3 block((unsigned)stats.tuning.block_x, (unsigned)stats.tuning.block_y);
+        const uint32_t image_stride_pixels = image.width * image.height;
+
+        CheckCuda(cudaEventRecord(evt_kernel_start, stream),
+                  "GpuRendererCuda::RenderDeviceRgbaBatch cudaEventRecord kernel_start");
+
+        for (const GpuRenderBatchV2& batch : buffer.batches)
+        {
+            const GpuAtlasHandle* atlas = atlas_manager.GetAtlas(batch.atlas_render_size);
+            if (!atlas)
+            {
+                throw std::runtime_error(
+                    "GpuRendererCuda::RenderDeviceRgbaBatch: missing uploaded atlas for render size "
+                    + std::to_string(batch.atlas_render_size));
+            }
+
+            uint32_t remaining = batch.command_count;
+            uint32_t offset = batch.command_offset;
+
+            while (remaining > 0)
+            {
+                const uint32_t chunk =
+                    remaining > stats.tuning.max_commands_per_launch
+                        ? stats.tuning.max_commands_per_launch
+                        : remaining;
+
+                RenderGlyphBatchKernelV2<<<chunk, block, 0, stream>>>(
+                    reinterpret_cast<uchar4*>(image.pixels),
+                    image.width,
+                    image.height,
+                    image_stride_pixels,
+                    atlas->device_pixels,
+                    atlas->atlas_width,
+                    m_device_commands_v2 + offset,
+                    chunk);
+                CheckCuda(cudaGetLastError(),
+                          "GpuRendererCuda::RenderDeviceRgbaBatch kernel launch");
+
+                remaining -= chunk;
+                offset += chunk;
+                ++stats.batches_rendered;
+                stats.glyphs_rendered += chunk;
+            }
+        }
+
+        CheckCuda(cudaEventRecord(evt_kernel_stop, stream),
+                  "GpuRendererCuda::RenderDeviceRgbaBatch cudaEventRecord kernel_stop");
+        CheckCuda(cudaStreamSynchronize(stream),
+                  "GpuRendererCuda::RenderDeviceRgbaBatch cudaStreamSynchronize");
 
         if (command_count > 0)
             RecordElapsed(evt_cmd_start, evt_cmd_stop, stats.command_upload_ms);
@@ -746,6 +1022,143 @@ GpuRenderStats GpuRendererCuda::RenderRgb(uint8_t* output_rgb,
     }
 }
 
+GpuRenderStats GpuRendererCuda::RenderRgbBatch(uint8_t* output_rgb,
+                                               GpuBufferMemoryType output_memory,
+                                               const uint8_t* input_rgb,
+                                               GpuBufferMemoryType input_memory,
+                                               uint32_t batch_size,
+                                               uint32_t width,
+                                               uint32_t height,
+                                               const GpuAtlasManager& atlas_manager,
+                                               const GpuCommandBufferV2& buffer,
+                                               void* stream_ptr)
+{
+    if (output_rgb == nullptr || input_rgb == nullptr
+        || batch_size == 0 || width == 0 || height == 0)
+    {
+        throw std::runtime_error(
+            "GpuRendererCuda::RenderRgbBatch: input and output buffers must be valid");
+    }
+
+    ValidateGpuCommandBufferV2(buffer, batch_size);
+    Initialize(m_device_index);
+
+    const std::size_t total_pixels = (std::size_t)batch_size * width * height;
+    const std::size_t rgb_bytes = total_pixels * 3u;
+    const std::size_t rgba_bytes = total_pixels * 4u;
+
+    EnsureDeviceCapacityVoid(m_device_image,
+                             m_device_image_bytes,
+                             rgba_bytes,
+                             "GpuRendererCuda::RenderRgbBatch cudaMalloc rgba");
+    EnsureDeviceCapacity(m_device_rgb,
+                         m_device_rgb_bytes,
+                         rgb_bytes,
+                         "GpuRendererCuda::RenderRgbBatch cudaMalloc rgb");
+
+    cudaEvent_t evt_upload_start = nullptr;
+    cudaEvent_t evt_upload_stop = nullptr;
+    cudaEvent_t evt_download_start = nullptr;
+    cudaEvent_t evt_download_stop = nullptr;
+
+    try
+    {
+        CheckCuda(cudaEventCreate(&evt_upload_start),
+                  "GpuRendererCuda::RenderRgbBatch cudaEventCreate");
+        CheckCuda(cudaEventCreate(&evt_upload_stop),
+                  "GpuRendererCuda::RenderRgbBatch cudaEventCreate");
+        CheckCuda(cudaEventCreate(&evt_download_start),
+                  "GpuRendererCuda::RenderRgbBatch cudaEventCreate");
+        CheckCuda(cudaEventCreate(&evt_download_stop),
+                  "GpuRendererCuda::RenderRgbBatch cudaEventCreate");
+
+        const cudaStream_t stream = SelectStream(stream_ptr, m_stream);
+        const uint32_t convert_block = 256u;
+        const uint32_t convert_grid =
+            total_pixels == 0 ? 1u
+                              : (uint32_t)((total_pixels + convert_block - 1u) / convert_block);
+
+        const uint8_t* device_rgb_input = input_rgb;
+        if (input_memory == GpuBufferMemoryType::Host)
+        {
+            CheckCuda(cudaEventRecord(evt_upload_start, stream),
+                      "GpuRendererCuda::RenderRgbBatch cudaEventRecord upload_start");
+            CheckCuda(cudaMemcpyAsync(m_device_rgb,
+                                      input_rgb,
+                                      rgb_bytes,
+                                      cudaMemcpyHostToDevice,
+                                      stream),
+                      "GpuRendererCuda::RenderRgbBatch cudaMemcpyAsync rgb->device");
+            CheckCuda(cudaEventRecord(evt_upload_stop, stream),
+                      "GpuRendererCuda::RenderRgbBatch cudaEventRecord upload_stop");
+            device_rgb_input = m_device_rgb;
+        }
+
+        RgbToRgbaKernel<<<convert_grid, convert_block, 0, stream>>>(
+            reinterpret_cast<uchar4*>(m_device_image),
+            device_rgb_input,
+            (uint32_t)total_pixels);
+        CheckCuda(cudaGetLastError(), "GpuRendererCuda::RenderRgbBatch rgb->rgba kernel");
+
+        GpuRenderStats stats = RenderDeviceRgbaBatch(
+            DeviceRgbaImageBatchView{batch_size, width, height, m_device_image, rgba_bytes},
+            atlas_manager,
+            buffer,
+            stream_ptr != nullptr ? stream_ptr : m_stream);
+
+        if (output_memory == GpuBufferMemoryType::Device)
+        {
+            RgbaToRgbKernel<<<convert_grid, convert_block, 0, stream>>>(
+                output_rgb,
+                reinterpret_cast<const uchar4*>(m_device_image),
+                (uint32_t)total_pixels);
+            CheckCuda(cudaGetLastError(), "GpuRendererCuda::RenderRgbBatch rgba->rgb kernel");
+            CheckCuda(cudaStreamSynchronize(stream),
+                      "GpuRendererCuda::RenderRgbBatch cudaStreamSynchronize device output");
+        }
+        else
+        {
+            RgbaToRgbKernel<<<convert_grid, convert_block, 0, stream>>>(
+                m_device_rgb,
+                reinterpret_cast<const uchar4*>(m_device_image),
+                (uint32_t)total_pixels);
+            CheckCuda(cudaGetLastError(), "GpuRendererCuda::RenderRgbBatch rgba->rgb kernel");
+
+            CheckCuda(cudaEventRecord(evt_download_start, stream),
+                      "GpuRendererCuda::RenderRgbBatch cudaEventRecord download_start");
+            CheckCuda(cudaMemcpyAsync(output_rgb,
+                                      m_device_rgb,
+                                      rgb_bytes,
+                                      cudaMemcpyDeviceToHost,
+                                      stream),
+                      "GpuRendererCuda::RenderRgbBatch cudaMemcpyAsync rgb->host");
+            CheckCuda(cudaEventRecord(evt_download_stop, stream),
+                      "GpuRendererCuda::RenderRgbBatch cudaEventRecord download_stop");
+            CheckCuda(cudaStreamSynchronize(stream),
+                      "GpuRendererCuda::RenderRgbBatch cudaStreamSynchronize host output");
+        }
+
+        if (input_memory == GpuBufferMemoryType::Host)
+            RecordElapsed(evt_upload_start, evt_upload_stop, stats.image_upload_ms);
+        if (output_memory == GpuBufferMemoryType::Host)
+            RecordElapsed(evt_download_start, evt_download_stop, stats.image_download_ms);
+
+        DestroyEvent(evt_upload_start);
+        DestroyEvent(evt_upload_stop);
+        DestroyEvent(evt_download_start);
+        DestroyEvent(evt_download_stop);
+        return stats;
+    }
+    catch (...)
+    {
+        DestroyEvent(evt_upload_start);
+        DestroyEvent(evt_upload_stop);
+        DestroyEvent(evt_download_start);
+        DestroyEvent(evt_download_stop);
+        throw;
+    }
+}
+
 GpuRenderStats RenderCommandBufferCuda(ImageRgba8& image,
                                        const GpuAtlasManager& atlas_manager,
                                        const GpuCommandBuffer& buffer,
@@ -778,6 +1191,32 @@ GpuRenderStats RenderCommandBufferCudaRgb(uint8_t* output_rgb,
                               atlas_manager,
                               buffer,
                               stream);
+}
+
+GpuRenderStats RenderCommandBufferCudaRgbBatch(uint8_t* output_rgb,
+                                               GpuBufferMemoryType output_memory,
+                                               const uint8_t* input_rgb,
+                                               GpuBufferMemoryType input_memory,
+                                               uint32_t batch_size,
+                                               uint32_t width,
+                                               uint32_t height,
+                                               const GpuAtlasManager& atlas_manager,
+                                               const GpuCommandBufferV2& buffer,
+                                               int device_index,
+                                               void* stream)
+{
+    GpuRendererCuda renderer;
+    renderer.Initialize(device_index);
+    return renderer.RenderRgbBatch(output_rgb,
+                                   output_memory,
+                                   input_rgb,
+                                   input_memory,
+                                   batch_size,
+                                   width,
+                                   height,
+                                   atlas_manager,
+                                   buffer,
+                                   stream);
 }
 
 GpuRenderStats RenderPlanCuda(ImageRgba8& image,

@@ -1,0 +1,41 @@
+name: "text_renderer_gpu"
+backend: "text_renderer_gpu"
+max_batch_size: 0
+
+input [
+  {
+    name: "input_images"
+    data_type: TYPE_UINT8
+    dims: [ -1, 1200, 900, 3 ]
+  },
+  {
+    name: "command_version"
+    data_type: TYPE_INT32
+    dims: [ 1 ]
+  },
+  {
+    name: "command_bytes"
+    data_type: TYPE_UINT8
+    dims: [ -1 ]
+  },
+  {
+    name: "batch_bytes"
+    data_type: TYPE_UINT8
+    dims: [ -1 ]
+  }
+]
+
+output [
+  {
+    name: "rendered_image"
+    data_type: TYPE_UINT8
+    dims: [ -1, 1200, 900, 3 ]
+  }
+]
+
+instance_group [
+  {
+    kind: KIND_GPU
+    count: 1
+  }
+]

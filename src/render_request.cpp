@@ -1,5 +1,7 @@
 #include "render_request.h"
 
+#include "text_renderer_cpu.h"
+
 #include <limits>
 #include <stdexcept>
 
@@ -175,6 +177,66 @@ RgbRenderRequest BuildRgbRenderRequest(uint32_t width,
     request.image_rgb = std::move(image_rgb);
     request.regions = BuildTextRegionsFromPolygonTensorData(region_data);
     return request;
+}
+
+LumaRenderRequest BuildLumaRenderRequest(uint32_t width,
+                                         uint32_t height,
+                                         std::vector<uint8_t> image_luma,
+                                         const PolygonRegionTensorData& region_data)
+{
+    if (width == 0 || height == 0)
+        throw std::runtime_error("BuildLumaRenderRequest: image dimensions must be positive");
+
+    if (image_luma.size() != (std::size_t)width * height)
+    {
+        throw std::runtime_error(
+            "BuildLumaRenderRequest: luma image byte size does not match width * height");
+    }
+
+    LumaRenderRequest request;
+    request.width = width;
+    request.height = height;
+    request.image_luma = std::move(image_luma);
+    request.regions = BuildTextRegionsFromPolygonTensorData(region_data);
+    return request;
+}
+
+PlannedGpuRenderRequest BuildPlannedGpuRenderRequest(
+    const FontDatabase& db,
+    const LumaRenderRequest& request,
+    uint32_t image_index,
+    const RenderPlanOptions& options)
+{
+    if (!request.HasValidImage())
+    {
+        throw std::runtime_error(
+            "BuildPlannedGpuRenderRequest: request image dimensions do not match the luma buffer");
+    }
+
+    ImageRgba8 brightness_image(request.width, request.height, 0x000000FFu);
+    for (uint32_t y = 0; y < request.height; ++y)
+    {
+        for (uint32_t x = 0; x < request.width; ++x)
+        {
+            const uint8_t value = request.image_luma[(std::size_t)y * request.width + x];
+            uint8_t* pixel = brightness_image.PixelPtr(x, y);
+            pixel[0] = value;
+            pixel[1] = value;
+            pixel[2] = value;
+            pixel[3] = 255u;
+        }
+    }
+
+    const RenderPlan plan = BuildRenderPlan(db, brightness_image, request.regions, options);
+
+    PlannedGpuRenderRequest out;
+    out.width = request.width;
+    out.height = request.height;
+    out.image_index = image_index;
+    out.command_buffer = BuildGpuCommandBufferV2(db, plan, image_index);
+    out.command_bytes = SerializeGpuRenderCommandsV2(out.command_buffer.commands);
+    out.batch_bytes = SerializeGpuRenderBatchesV2(out.command_buffer.batches);
+    return out;
 }
 
 } // namespace fac

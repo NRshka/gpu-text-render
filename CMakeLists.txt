@@ -54,6 +54,10 @@ target_compile_options(text_layout PRIVATE -Wall -Wextra -O2)
 
 add_library(render_request STATIC src/render_request.cpp)
 target_include_directories(render_request PUBLIC include)
+target_link_libraries(render_request PUBLIC
+    gpu_command_buffer
+    text_renderer_cpu
+)
 target_compile_options(render_request PRIVATE -Wall -Wextra -O2)
 
 add_library(render_plan STATIC src/render_plan.cpp)
@@ -208,6 +212,30 @@ if (GPU_FONT_BUILD_TRITON_BACKEND)
 
     add_custom_target(text_renderer
         DEPENDS triton_text_renderer_backend
+    )
+
+    add_library(triton_text_renderer_gpu_backend SHARED
+        src/triton_text_renderer_gpu_backend.cpp
+    )
+    target_include_directories(triton_text_renderer_gpu_backend PRIVATE
+        include
+        ${TRITON_BACKEND_INCLUDE_ROOT}
+    )
+    target_link_libraries(triton_text_renderer_gpu_backend PRIVATE
+        gpu_renderer_cuda
+        gpu_command_buffer
+        gpu_atlas_manager
+        font_database
+        CUDA::cudart
+    )
+    target_compile_options(triton_text_renderer_gpu_backend PRIVATE -Wall -Wextra -O2)
+    set_target_properties(triton_text_renderer_gpu_backend PROPERTIES
+        PREFIX ""
+        OUTPUT_NAME "text_renderer_gpu"
+    )
+
+    add_custom_target(text_renderer_gpu
+        DEPENDS triton_text_renderer_gpu_backend
     )
 endif()
 

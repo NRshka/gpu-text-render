@@ -31,6 +31,24 @@ struct DeviceRgbaImageView
     }
 };
 
+struct DeviceRgbaImageBatchView
+{
+    uint32_t batch_size = 0;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    void* pixels = nullptr;
+    std::size_t pixel_bytes = 0;
+
+    bool IsValid() const noexcept
+    {
+        return batch_size > 0
+            && width > 0
+            && height > 0
+            && pixels != nullptr
+            && pixel_bytes >= (std::size_t)batch_size * width * height * 4u;
+    }
+};
+
 struct GpuRenderStats
 {
     GpuDeviceInfo device;
@@ -66,6 +84,11 @@ public:
                                     const GpuCommandBuffer& buffer,
                                     void* stream = nullptr);
 
+    GpuRenderStats RenderDeviceRgbaBatch(const DeviceRgbaImageBatchView& image,
+                                         const GpuAtlasManager& atlas_manager,
+                                         const GpuCommandBufferV2& buffer,
+                                         void* stream = nullptr);
+
     GpuRenderStats RenderRgb(uint8_t* output_rgb,
                              GpuBufferMemoryType output_memory,
                              const uint8_t* input_rgb,
@@ -75,6 +98,17 @@ public:
                              const GpuAtlasManager& atlas_manager,
                              const GpuCommandBuffer& buffer,
                              void* stream = nullptr);
+
+    GpuRenderStats RenderRgbBatch(uint8_t* output_rgb,
+                                  GpuBufferMemoryType output_memory,
+                                  const uint8_t* input_rgb,
+                                  GpuBufferMemoryType input_memory,
+                                  uint32_t batch_size,
+                                  uint32_t width,
+                                  uint32_t height,
+                                  const GpuAtlasManager& atlas_manager,
+                                  const GpuCommandBufferV2& buffer,
+                                  void* stream = nullptr);
 
 private:
     int m_device_index = -2;
@@ -86,6 +120,10 @@ private:
     std::size_t m_device_command_capacity = 0;
     GpuRenderCommand* m_host_command_staging = nullptr;
     std::size_t m_host_command_capacity = 0;
+    GpuRenderCommandV2* m_device_commands_v2 = nullptr;
+    std::size_t m_device_command_capacity_v2 = 0;
+    GpuRenderCommandV2* m_host_command_staging_v2 = nullptr;
+    std::size_t m_host_command_capacity_v2 = 0;
     void* m_stream = nullptr;
 };
 
@@ -104,6 +142,18 @@ GpuRenderStats RenderCommandBufferCudaRgb(uint8_t* output_rgb,
                                           const GpuCommandBuffer& buffer,
                                           int device_index = -1,
                                           void* stream = nullptr);
+
+GpuRenderStats RenderCommandBufferCudaRgbBatch(uint8_t* output_rgb,
+                                               GpuBufferMemoryType output_memory,
+                                               const uint8_t* input_rgb,
+                                               GpuBufferMemoryType input_memory,
+                                               uint32_t batch_size,
+                                               uint32_t width,
+                                               uint32_t height,
+                                               const GpuAtlasManager& atlas_manager,
+                                               const GpuCommandBufferV2& buffer,
+                                               int device_index = -1,
+                                               void* stream = nullptr);
 
 GpuRenderStats RenderPlanCuda(ImageRgba8& image,
                               const FontDatabase& db,

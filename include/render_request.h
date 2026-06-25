@@ -1,5 +1,8 @@
 #pragma once
 
+#include "font_database.h"
+#include "gpu_command_buffer.h"
+#include "render_plan.h"
 #include "text_render_types.h"
 
 #include <cstddef>
@@ -35,6 +38,31 @@ struct RgbRenderRequest
     }
 };
 
+struct LumaRenderRequest
+{
+    uint32_t width = 0;
+    uint32_t height = 0;
+    std::vector<uint8_t> image_luma;
+    std::vector<TextRegion> regions;
+
+    bool HasValidImage() const noexcept
+    {
+        return width > 0
+            && height > 0
+            && image_luma.size() == (std::size_t)width * height;
+    }
+};
+
+struct PlannedGpuRenderRequest
+{
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t image_index = 0;
+    GpuCommandBufferV2 command_buffer;
+    std::vector<uint8_t> command_bytes;
+    std::vector<uint8_t> batch_bytes;
+};
+
 bool IsValidUtf8(std::string_view text) noexcept;
 
 std::vector<TextRegion> BuildTextRegionsFromPolygonTensorData(
@@ -44,5 +72,16 @@ RgbRenderRequest BuildRgbRenderRequest(uint32_t width,
                                        uint32_t height,
                                        std::vector<uint8_t> image_rgb,
                                        const PolygonRegionTensorData& region_data);
+
+LumaRenderRequest BuildLumaRenderRequest(uint32_t width,
+                                         uint32_t height,
+                                         std::vector<uint8_t> image_luma,
+                                         const PolygonRegionTensorData& region_data);
+
+PlannedGpuRenderRequest BuildPlannedGpuRenderRequest(
+    const FontDatabase& db,
+    const LumaRenderRequest& request,
+    uint32_t image_index = 0,
+    const RenderPlanOptions& options = {});
 
 } // namespace fac
