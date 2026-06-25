@@ -213,21 +213,35 @@ PlannedGpuRenderRequest BuildPlannedGpuRenderRequest(
             "BuildPlannedGpuRenderRequest: request image dimensions do not match the luma buffer");
     }
 
-    ImageRgba8 brightness_image(request.width, request.height, 0x000000FFu);
-    for (uint32_t y = 0; y < request.height; ++y)
+    RenderPlan plan;
+    if (options.profile == PlannerProfile::Adaptive)
     {
-        for (uint32_t x = 0; x < request.width; ++x)
-        {
-            const uint8_t value = request.image_luma[(std::size_t)y * request.width + x];
-            uint8_t* pixel = brightness_image.PixelPtr(x, y);
-            pixel[0] = value;
-            pixel[1] = value;
-            pixel[2] = value;
-            pixel[3] = 255u;
-        }
+        plan = BuildAdaptiveRenderPlan(
+            db,
+            request.width,
+            request.height,
+            request.image_luma,
+            request.regions,
+            options);
     }
+    else
+    {
+        ImageRgba8 brightness_image(request.width, request.height, 0x000000FFu);
+        for (uint32_t y = 0; y < request.height; ++y)
+        {
+            for (uint32_t x = 0; x < request.width; ++x)
+            {
+                const uint8_t value = request.image_luma[(std::size_t)y * request.width + x];
+                uint8_t* pixel = brightness_image.PixelPtr(x, y);
+                pixel[0] = value;
+                pixel[1] = value;
+                pixel[2] = value;
+                pixel[3] = 255u;
+            }
+        }
 
-    const RenderPlan plan = BuildRenderPlan(db, brightness_image, request.regions, options);
+        plan = BuildRenderPlan(db, brightness_image, request.regions, options);
+    }
 
     PlannedGpuRenderRequest out;
     out.width = request.width;

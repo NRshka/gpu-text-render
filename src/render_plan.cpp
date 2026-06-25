@@ -6,6 +6,7 @@
 #include <array>
 #include <cmath>
 #include <limits>
+#include <memory>
 #include <unordered_map>
 
 namespace fac {
@@ -22,6 +23,12 @@ enum class GeometryKind
 {
     Straight,
     Curved,
+};
+
+enum class RegionPlannerKind
+{
+    FastStraight,
+    Quality,
 };
 
 struct LocalBounds
@@ -84,6 +91,14 @@ struct PlannedRegion
     }
 };
 
+struct RegionFeatures
+{
+    RegionPlannerKind initial_kind = RegionPlannerKind::Quality;
+    OrientedBox straight_box;
+    bool brightness_ambiguous = false;
+    float translated_ratio = 1.0f;
+};
+
 struct GlyphQuad
 {
     const AtlasEntry* atlas = nullptr;
@@ -105,6 +120,17 @@ struct PlacedFootprint
     bool overflowed = false;
 };
 
+struct AcceptedPlacement
+{
+    bool valid = false;
+    bool overflowed = false;
+    bool is_curved = false;
+    uint32_t render_size = 0;
+    std::vector<RenderGlyph> commands;
+    OrientedBox placed_box;
+    PlacedFootprint footprint;
+};
+
 struct PlacementCandidate
 {
     bool valid = false;
@@ -118,6 +144,14 @@ struct PlacementCandidate
     std::vector<RenderGlyph> glyphs;
     std::vector<GlyphQuad> quads;
 };
+
+static PlacementCandidate ResolveOverflowPlacement(const PlannedRegion& region,
+                                                   const RenderPlanOptions& options,
+                                                   const std::vector<PlacedFootprint>& placed);
+
+static TextFitResult ResolveOverlaps(const PlannedRegion& region,
+                                     const RenderPlanOptions& options,
+                                     const std::vector<OrientedBox>& placed);
 
 static float Clamp(float v, float lo, float hi) noexcept
 {
@@ -145,6 +179,17 @@ static std::size_t CountTrimmedCodepoints(std::string_view text)
         --last;
 
     return last - first;
+}
+
+static float PolygonArea(const std::vector<Vec2f>& polygon) noexcept
+{
+    if (polygon.size() < 3)
+        return 0.0f;
+
+    double area2 = 0.0;
+    for (std::size_t i = 0, j = polygon.size() - 1; i < polygon.size(); j = i++)
+        area2 += (double)polygon[j].x * polygon[i].y - (double)polygon[i].x * polygon[j].y;
+    return (float)(std::fabs(area2) * 0.5);
 }
 
 static const AtlasEntry* SelectAtlasForHeight(const FontDatabase& db,
@@ -904,6 +949,93 @@ static double SampleBrightnessFromBox(const ImageRgba8& image,
     return (samples > 0) ? (brightness_sum / (double)samples) : kBrightnessThreshold;
 }
 
+static double SampleBrightnessFromBoundingBox(const ImageRgba8& image,
+                                              const std::vector<Vec2f>& polygon,
+                                              std::size_t& samples)
+{
+    samples = 0;
+    if (image.Empty() || polygon.size() < 3)
+        return kBrightnessThreshold;
+
+    float min_x = polygon.front().x;
+    float min_y = polygon.front().y;
+    float max_x = polygon.front().x;
+    float max_y = polygon.front().y;
+    for (const Vec2f& point : polygon)
+    {
+        min_x = std::min(min_x, point.x);
+        min_y = std::min(min_y, point.y);
+        max_x = std::max(max_x, point.x);
+        max_y = std::max(max_y, point.y);
+    }
+
+    const int x0 = std::max(0, (int)std::floor(min_x));
+    const int y0 = std::max(0, (int)std::floor(min_y));
+    const int x1 = std::min((int)image.width - 1, (int)std::ceil(max_x));
+    const int y1 = std::min((int)image.height - 1, (int)std::ceil(max_y));
+    if (x0 > x1 || y0 > y1)
+        return kBrightnessThreshold;
+
+    double brightness_sum = 0.0;
+    for (int y = y0; y <= y1; ++y)
+    {
+        for (int x = x0; x <= x1; ++x)
+        {
+            const uint8_t* pixel = image.PixelPtr((uint32_t)x, (uint32_t)y);
+            brightness_sum += ((double)pixel[0] + (double)pixel[1] + (double)pixel[2]) / 3.0;
+            ++samples;
+        }
+    }
+
+    return (samples > 0) ? (brightness_sum / (double)samples) : kBrightnessThreshold;
+}
+
+static double SampleBrightnessFromLumaBoundingBox(uint32_t width,
+                                                  uint32_t height,
+                                                  const std::vector<uint8_t>& image_luma,
+                                                  const std::vector<Vec2f>& polygon,
+                                                  std::size_t& samples)
+{
+    samples = 0;
+    if (width == 0 || height == 0
+        || image_luma.size() != (std::size_t)width * height
+        || polygon.size() < 3)
+    {
+        return kBrightnessThreshold;
+    }
+
+    float min_x = polygon.front().x;
+    float min_y = polygon.front().y;
+    float max_x = polygon.front().x;
+    float max_y = polygon.front().y;
+    for (const Vec2f& point : polygon)
+    {
+        min_x = std::min(min_x, point.x);
+        min_y = std::min(min_y, point.y);
+        max_x = std::max(max_x, point.x);
+        max_y = std::max(max_y, point.y);
+    }
+
+    const int x0 = std::max(0, (int)std::floor(min_x));
+    const int y0 = std::max(0, (int)std::floor(min_y));
+    const int x1 = std::min((int)width - 1, (int)std::ceil(max_x));
+    const int y1 = std::min((int)height - 1, (int)std::ceil(max_y));
+    if (x0 > x1 || y0 > y1)
+        return kBrightnessThreshold;
+
+    double brightness_sum = 0.0;
+    for (int y = y0; y <= y1; ++y)
+    {
+        for (int x = x0; x <= x1; ++x)
+        {
+            brightness_sum += image_luma[(std::size_t)y * width + (std::size_t)x];
+            ++samples;
+        }
+    }
+
+    return (samples > 0) ? (brightness_sum / (double)samples) : kBrightnessThreshold;
+}
+
 static double SampleBrightnessFromPolygon(const ImageRgba8& image,
                                           const std::vector<Vec2f>& polygon,
                                           std::size_t& samples)
@@ -1380,6 +1512,67 @@ static PlannedRegion MakeProvisionalRegion(const FontDatabase& db,
     return out;
 }
 
+static RegionFeatures ComputeRegionFeatures(const TextRegion& region)
+{
+    RegionFeatures features;
+
+    const std::size_t original_len =
+        std::max<std::size_t>(1, CountTrimmedCodepoints(region.original_text));
+    const std::size_t translated_len =
+        std::max<std::size_t>(1, CountTrimmedCodepoints(region.text));
+    features.translated_ratio = (float)translated_len / (float)original_len;
+
+    if (!region.has_polygon || region.polygon.size() < 3 || region.has_curve)
+        return features;
+
+    features.straight_box = MakeStraightBoxFromPolygon(region.polygon);
+    if (!features.straight_box.HasArea() || !features.straight_box.HasFiniteBasis())
+        return features;
+
+    if (region.polygon.size() > 8u || features.translated_ratio > 1.8f)
+        return features;
+
+    const float polygon_area = PolygonArea(region.polygon);
+    const float box_area = features.straight_box.width * features.straight_box.height;
+    if (!(polygon_area > 0.0f) || !(box_area > 0.0f))
+        return features;
+
+    const float area_ratio = polygon_area / box_area;
+    if (area_ratio < 0.72f)
+        return features;
+
+    features.initial_kind = RegionPlannerKind::FastStraight;
+    return features;
+}
+
+static void AppendPlacement(RenderPlan& plan,
+                            std::unordered_map<uint32_t, std::size_t>& batch_by_size,
+                            const AcceptedPlacement& placement,
+                            std::vector<OrientedBox>& placed_boxes,
+                            std::vector<PlacedFootprint>& placed_footprints)
+{
+    auto [it, inserted] = batch_by_size.emplace(placement.render_size, plan.batches.size());
+    if (inserted)
+    {
+        RenderBatch batch;
+        batch.atlas_render_size = placement.render_size;
+        plan.batches.push_back(std::move(batch));
+    }
+
+    RenderBatch& batch = plan.batches[it->second];
+    batch.glyphs.reserve(batch.glyphs.size() + placement.commands.size());
+    batch.glyphs.insert(batch.glyphs.end(), placement.commands.begin(), placement.commands.end());
+
+    if (!placement.is_curved)
+        placed_boxes.push_back(placement.placed_box);
+    placed_footprints.push_back(placement.footprint);
+
+    ++plan.fitted_regions;
+    if (placement.overflowed)
+        ++plan.overflowed_regions;
+    plan.total_glyphs += placement.commands.size();
+}
+
 static float ComputeBaselineFraction(const PlannedRegion& region) noexcept
 {
     return (region.fit.baseline_y + 0.5f * region.geometry.box.height)
@@ -1587,6 +1780,193 @@ static std::vector<GlyphQuad> BuildGlyphQuads(const AtlasEntry& atlas,
         quads.push_back(MakeGlyphQuad(atlas, glyph));
     }
     return quads;
+}
+
+static AcceptedPlacement TryAcceptFastStraightRegion(const FontDatabase& db,
+                                                     const TextRegion& region,
+                                                     std::size_t original_index,
+                                                     const RegionFeatures& features,
+                                                     const RenderPlanOptions& options,
+                                                     const std::vector<OrientedBox>& placed_boxes,
+                                                     const std::vector<PlacedFootprint>& placed_footprints,
+                                                     double brightness)
+{
+    (void)placed_footprints;
+
+    AcceptedPlacement accepted;
+    PlannedRegion planned;
+    planned.region = &region;
+    planned.original_index = original_index;
+    planned.geometry.kind = GeometryKind::Straight;
+    planned.geometry.box = features.straight_box;
+
+    planned.fit = FitTextToBox(db, region.text, planned.geometry.box, MakeFitOptions(options));
+    if (!planned.fit.IsValid() || planned.fit.atlas == nullptr)
+        return accepted;
+
+    planned.measurement = MeasureTextLine(*planned.fit.atlas, region.text);
+    if (planned.measurement.glyph_count == 0)
+        return accepted;
+
+    const std::size_t original_len =
+        std::max<std::size_t>(1, CountTrimmedCodepoints(region.original_text));
+    const std::size_t translated_len =
+        std::max<std::size_t>(1, CountTrimmedCodepoints(region.text));
+    if (translated_len > original_len)
+    {
+        const float factor =
+            std::pow((float)original_len / (float)translated_len, 0.6f);
+        ScaleFit(planned.geometry.box, planned.measurement, options.fit, factor, planned.fit);
+    }
+
+    if (!planned.fit.IsValid() || planned.fit.line_height < options.min_line_height_px)
+        return accepted;
+
+    if (std::fabs(brightness - kBrightnessThreshold) <= 18.0)
+        return accepted;
+
+    planned.resolved_rgba = region.has_explicit_rgba
+        ? region.rgba
+        : ((brightness < kBrightnessThreshold) ? 0xFFFFFFFFu : 0x000000FFu);
+
+    RenderPlanOptions fast_options = options;
+    fast_options.allow_overflow = false;
+    fast_options.resolve_overlaps = true;
+    fast_options.nudge_steps = 4;
+    fast_options.shrink_factor = 0.97f;
+
+    planned.fit = ResolveOverlaps(planned, fast_options, placed_boxes);
+    if (!planned.fit.IsValid() || planned.fit.line_height < fast_options.min_line_height_px)
+        return accepted;
+
+    const OrientedBox accepted_box = MakePlacedBox(planned.geometry.box, planned.fit, planned.measurement);
+    if (OverlapsAny(accepted_box, placed_boxes, fast_options.overlap_margin_px))
+        return accepted;
+
+    std::vector<RenderGlyph> glyphs = BuildStraightGlyphs(planned, planned.fit);
+    if (glyphs.empty())
+        return accepted;
+
+    std::vector<GlyphQuad> quads = BuildGlyphQuads(*planned.fit.atlas, glyphs);
+    const std::size_t outside_score = region.has_polygon
+        ? CountOutsideSamples(region.polygon, quads)
+        : 0u;
+    if (outside_score > 2u)
+        return accepted;
+
+    accepted.valid = true;
+    accepted.overflowed = OverflowedBox(planned.geometry.box, planned.measurement, fast_options.fit, planned.fit);
+    accepted.is_curved = false;
+    accepted.render_size = planned.fit.atlas->render_size;
+    accepted.commands = std::move(glyphs);
+    accepted.placed_box = accepted_box;
+    accepted.footprint.overflowed = accepted.overflowed;
+    accepted.footprint.quads = std::move(quads);
+    return accepted;
+}
+
+static AcceptedPlacement TryAcceptQualityRegion(const FontDatabase& db,
+                                                const TextRegion& region,
+                                                std::size_t original_index,
+                                                const ImageRgba8& image,
+                                                const RenderPlanOptions& options,
+                                                const std::vector<OrientedBox>& placed_boxes,
+                                                const std::vector<PlacedFootprint>& placed_footprints)
+{
+    AcceptedPlacement accepted;
+    PlannedRegion entry = MakeProvisionalRegion(db, region, original_index, image, options);
+    if (!entry.valid)
+        return accepted;
+
+    std::vector<RenderGlyph> commands;
+    uint32_t render_size = 0;
+    bool overflowed = false;
+    PlacedFootprint footprint;
+
+    if (options.allow_overflow)
+    {
+        const PlacementCandidate placement =
+            ResolveOverflowPlacement(entry, options, placed_footprints);
+        if (!placement.valid)
+            return accepted;
+
+        commands = placement.glyphs;
+        overflowed = placement.overflowed;
+        render_size = entry.IsCurved()
+            ? placement.curve_fit.atlas->render_size
+            : placement.fit.atlas->render_size;
+        if (entry.IsCurved())
+            entry.curve_fit = placement.curve_fit;
+        else
+            entry.fit = placement.fit;
+        footprint.overflowed = placement.overflowed;
+        footprint.quads = placement.quads;
+    }
+    else
+    {
+        if (entry.IsCurved())
+        {
+            if (!entry.curve_fit.IsValid() || entry.curve_fit.atlas == nullptr)
+                return accepted;
+
+            commands = LayoutTextOnCurve(*entry.curve_fit.atlas,
+                                         entry.region->text,
+                                         entry.geometry.curve,
+                                         entry.curve_fit,
+                                         entry.resolved_rgba);
+            render_size = entry.curve_fit.atlas->render_size;
+        }
+        else
+        {
+            if (!entry.fit.IsValid() || entry.fit.atlas == nullptr)
+                return accepted;
+
+            entry.fit = ResolveOverlaps(entry, options, placed_boxes);
+            if (!entry.fit.IsValid())
+                return accepted;
+
+            commands = BuildStraightGlyphs(entry, entry.fit);
+            render_size = entry.fit.atlas->render_size;
+        }
+
+        if (commands.empty())
+            return accepted;
+        footprint.overflowed = false;
+        if (entry.IsCurved())
+            footprint.quads = BuildGlyphQuads(*entry.curve_fit.atlas, commands);
+        else
+            footprint.quads = BuildGlyphQuads(*entry.fit.atlas, commands);
+    }
+
+    accepted.valid = true;
+    accepted.overflowed = overflowed;
+    accepted.is_curved = entry.IsCurved();
+    accepted.render_size = render_size;
+    accepted.commands = std::move(commands);
+    if (!entry.IsCurved())
+        accepted.placed_box = MakePlacedBox(entry.geometry.box, entry.fit, entry.measurement);
+    accepted.footprint = std::move(footprint);
+    return accepted;
+}
+
+static ImageRgba8 BuildBrightnessImageFromLuma(uint32_t width,
+                                               uint32_t height,
+                                               const std::vector<uint8_t>& image_luma)
+{
+    ImageRgba8 brightness_image(width, height, 0x000000FFu);
+    for (uint32_t y = 0; y < height; ++y)
+    {
+        for (uint32_t x = 0; x < width; ++x)
+        {
+            const uint8_t value = image_luma[(std::size_t)y * width + x];
+            uint8_t* pixel = brightness_image.PixelPtr(x, y);
+            pixel[0] = value;
+            pixel[1] = value;
+            pixel[2] = value;
+            pixel[3] = 255u;
+        }
+    }
+    return brightness_image;
 }
 
 static PlacementCandidate MakeStraightCandidate(const PlannedRegion& region,
@@ -1841,10 +2221,10 @@ static TextFitResult ResolveOverlaps(const PlannedRegion& region,
 
 } // namespace
 
-RenderPlan BuildRenderPlan(const FontDatabase& db,
-                           const ImageRgba8& image,
-                           const std::vector<TextRegion>& regions,
-                           const RenderPlanOptions& options)
+static RenderPlan BuildQualityRenderPlanInternal(const FontDatabase& db,
+                                                 const ImageRgba8& image,
+                                                 const std::vector<TextRegion>& regions,
+                                                 const RenderPlanOptions& options)
 {
     RenderPlan plan;
     plan.total_regions = regions.size();
@@ -1971,12 +2351,172 @@ RenderPlan BuildRenderPlan(const FontDatabase& db,
             placed_boxes.push_back(MakePlacedBox(entry.geometry.box, entry.fit, entry.measurement));
 
         ++plan.fitted_regions;
+        ++plan.quality_regions;
         if (overflowed)
             ++plan.overflowed_regions;
         plan.total_glyphs += commands.size();
     }
 
     return plan;
+}
+
+static RenderPlan BuildAdaptiveRenderPlanInternal(const FontDatabase& db,
+                                                  const ImageRgba8& image,
+                                                  const std::vector<TextRegion>& regions,
+                                                  const RenderPlanOptions& options)
+{
+    RenderPlan plan;
+    plan.total_regions = regions.size();
+
+    std::unordered_map<uint32_t, std::size_t> batch_by_size;
+    std::vector<OrientedBox> placed_boxes;
+    placed_boxes.reserve(regions.size());
+    std::vector<PlacedFootprint> placed_footprints;
+    placed_footprints.reserve(regions.size());
+
+    for (std::size_t i = 0; i < regions.size(); ++i)
+    {
+        const TextRegion& region = regions[i];
+        const RegionFeatures features = ComputeRegionFeatures(region);
+
+        AcceptedPlacement placement;
+        if (features.initial_kind == RegionPlannerKind::FastStraight)
+        {
+            std::size_t samples = 0;
+            const double brightness =
+                SampleBrightnessFromBoundingBox(image, region.polygon, samples);
+            placement = TryAcceptFastStraightRegion(db,
+                                                    region,
+                                                    i,
+                                                    features,
+                                                    options,
+                                                    placed_boxes,
+                                                    placed_footprints,
+                                                    brightness);
+            if (placement.valid)
+            {
+                ++plan.fast_regions;
+                AppendPlacement(plan, batch_by_size, placement, placed_boxes, placed_footprints);
+                continue;
+            }
+
+            ++plan.escalated_regions;
+        }
+
+        placement = TryAcceptQualityRegion(db,
+                                           region,
+                                           i,
+                                           image,
+                                           options,
+                                           placed_boxes,
+                                           placed_footprints);
+        if (!placement.valid)
+        {
+            ++plan.unplaced_regions;
+            continue;
+        }
+
+        ++plan.quality_regions;
+        AppendPlacement(plan, batch_by_size, placement, placed_boxes, placed_footprints);
+    }
+
+    return plan;
+}
+
+static RenderPlan BuildAdaptiveRenderPlanFromLumaInternal(const FontDatabase& db,
+                                                          uint32_t width,
+                                                          uint32_t height,
+                                                          const std::vector<uint8_t>& image_luma,
+                                                          const std::vector<TextRegion>& regions,
+                                                          const RenderPlanOptions& options)
+{
+    RenderPlan plan;
+    plan.total_regions = regions.size();
+
+    std::unordered_map<uint32_t, std::size_t> batch_by_size;
+    std::vector<OrientedBox> placed_boxes;
+    placed_boxes.reserve(regions.size());
+    std::vector<PlacedFootprint> placed_footprints;
+    placed_footprints.reserve(regions.size());
+    std::unique_ptr<ImageRgba8> quality_image;
+
+    const auto ensure_quality_image = [&]() -> const ImageRgba8& {
+        if (!quality_image)
+            quality_image = std::make_unique<ImageRgba8>(
+                BuildBrightnessImageFromLuma(width, height, image_luma));
+        return *quality_image;
+    };
+
+    for (std::size_t i = 0; i < regions.size(); ++i)
+    {
+        const TextRegion& region = regions[i];
+        const RegionFeatures features = ComputeRegionFeatures(region);
+
+        AcceptedPlacement placement;
+        if (features.initial_kind == RegionPlannerKind::FastStraight)
+        {
+            std::size_t samples = 0;
+            const double brightness = SampleBrightnessFromLumaBoundingBox(width,
+                                                                          height,
+                                                                          image_luma,
+                                                                          region.polygon,
+                                                                          samples);
+            placement = TryAcceptFastStraightRegion(db,
+                                                    region,
+                                                    i,
+                                                    features,
+                                                    options,
+                                                    placed_boxes,
+                                                    placed_footprints,
+                                                    brightness);
+            if (placement.valid)
+            {
+                ++plan.fast_regions;
+                AppendPlacement(plan, batch_by_size, placement, placed_boxes, placed_footprints);
+                continue;
+            }
+
+            ++plan.escalated_regions;
+        }
+
+        placement = TryAcceptQualityRegion(db,
+                                           region,
+                                           i,
+                                           ensure_quality_image(),
+                                           options,
+                                           placed_boxes,
+                                           placed_footprints);
+        if (!placement.valid)
+        {
+            ++plan.unplaced_regions;
+            continue;
+        }
+
+        ++plan.quality_regions;
+        AppendPlacement(plan, batch_by_size, placement, placed_boxes, placed_footprints);
+    }
+
+    return plan;
+}
+
+RenderPlan BuildRenderPlan(const FontDatabase& db,
+                           const ImageRgba8& image,
+                           const std::vector<TextRegion>& regions,
+                           const RenderPlanOptions& options)
+{
+    if (options.profile == PlannerProfile::Adaptive)
+        return BuildAdaptiveRenderPlanInternal(db, image, regions, options);
+    return BuildQualityRenderPlanInternal(db, image, regions, options);
+}
+
+RenderPlan BuildAdaptiveRenderPlan(const FontDatabase& db,
+                                   uint32_t width,
+                                   uint32_t height,
+                                   const std::vector<uint8_t>& image_luma,
+                                   const std::vector<TextRegion>& regions,
+                                   const RenderPlanOptions& options)
+{
+    return BuildAdaptiveRenderPlanFromLumaInternal(db, width, height, image_luma, regions, options);
 }
 
 } // namespace fac

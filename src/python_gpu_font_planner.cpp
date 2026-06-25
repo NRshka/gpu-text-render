@@ -109,6 +109,15 @@ std::vector<uint8_t> BuildLumaFromRgb(
     return luma;
 }
 
+fac::PlannerProfile ParsePlannerProfile(const std::string& profile)
+{
+    if (profile == "adaptive")
+        return fac::PlannerProfile::Adaptive;
+    if (profile == "quality")
+        return fac::PlannerProfile::Quality;
+    throw py::value_error("profile must be 'adaptive' or 'quality'");
+}
+
 class GpuRenderPlanner
 {
 public:
@@ -135,12 +144,14 @@ public:
         const std::vector<std::string>& texts,
         const std::vector<std::vector<std::array<float, 2>>>& polygons,
         const py::object& original_texts_obj,
-        const py::object& rgba_obj) const
+        const py::object& rgba_obj,
+        const std::string& profile) const
     {
         try
         {
             const std::vector<std::string> original_texts =
                 ResolveOriginalTexts(texts, original_texts_obj);
+            const fac::PlannerProfile planner_profile = ParsePlannerProfile(profile);
 
             fac::PolygonRegionTensorData region_data;
             FillPolygonRegionData(region_data, texts, polygons, original_texts, rgba_obj);
@@ -155,7 +166,13 @@ public:
                     (uint32_t)kExpectedHeight,
                     std::move(luma),
                     region_data);
-                planned = fac::BuildPlannedGpuRenderRequest(m_font_database, request, 0u);
+                fac::RenderPlanOptions options;
+                options.profile = planner_profile;
+                planned = fac::BuildPlannedGpuRenderRequest(
+                    m_font_database,
+                    request,
+                    0u,
+                    options);
             }
 
             return {
@@ -193,5 +210,6 @@ PYBIND11_MODULE(gpu_font_planner, m)
              py::arg("texts"),
              py::arg("polygons"),
              py::arg("original_texts") = py::none(),
-             py::arg("rgba") = py::none());
+             py::arg("rgba") = py::none(),
+             py::arg("profile") = "adaptive");
 }

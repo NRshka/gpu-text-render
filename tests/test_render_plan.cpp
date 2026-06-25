@@ -622,6 +622,85 @@ int main()
         EXPECT(plan.overflowed_regions == 0u);
     }
 
+    SECTION("Adaptive planner fast-paths simple straight polygons");
+    {
+        TextRegion region;
+        region.text = "AB";
+        region.original_text = "AB";
+        region.has_polygon = true;
+        region.polygon = {
+            Vec2f{8.0f, 8.0f},
+            Vec2f{40.0f, 8.0f},
+            Vec2f{40.0f, 20.0f},
+            Vec2f{8.0f, 20.0f},
+        };
+
+        RenderPlanOptions options;
+        options.profile = PlannerProfile::Adaptive;
+        options.allow_overflow = false;
+        options.min_line_height_px = 2.0f;
+
+        const RenderPlan plan =
+            BuildRenderPlan(db, ImageRgba8(64, 32, 0x000000FFu), {region}, options);
+        EXPECT(plan.fitted_regions == 1u);
+        EXPECT(plan.fast_regions == 1u);
+        EXPECT(plan.quality_regions == 0u);
+        EXPECT(plan.escalated_regions == 0u);
+    }
+
+    SECTION("Adaptive planner routes explicit curves to quality");
+    {
+        TextRegion region;
+        region.text = "AB";
+        region.original_text = "AB";
+        region.has_curve = true;
+        region.curve.band_height = 18.0f;
+        region.curve.normal_side = CurveNormalSide::Left;
+
+        CubicBezierSegment segment;
+        segment.p0 = Vec2f{8.0f, 16.0f};
+        segment.p1 = Vec2f{20.0f, 16.0f};
+        segment.p2 = Vec2f{32.0f, 16.0f};
+        segment.p3 = Vec2f{44.0f, 16.0f};
+        region.curve.segments.push_back(segment);
+
+        RenderPlanOptions options;
+        options.profile = PlannerProfile::Adaptive;
+
+        const RenderPlan plan =
+            BuildRenderPlan(db, ImageRgba8(64, 32, 0x000000FFu), {region}, options);
+        EXPECT(plan.fitted_regions == 1u);
+        EXPECT(plan.fast_regions == 0u);
+        EXPECT(plan.quality_regions == 1u);
+        EXPECT(plan.escalated_regions == 0u);
+    }
+
+    SECTION("Adaptive planner escalates ambiguous brightness regions");
+    {
+        TextRegion region;
+        region.text = "AB";
+        region.original_text = "AB";
+        region.has_polygon = true;
+        region.polygon = {
+            Vec2f{8.0f, 8.0f},
+            Vec2f{40.0f, 8.0f},
+            Vec2f{40.0f, 20.0f},
+            Vec2f{8.0f, 20.0f},
+        };
+
+        RenderPlanOptions options;
+        options.profile = PlannerProfile::Adaptive;
+        options.allow_overflow = false;
+        options.min_line_height_px = 2.0f;
+
+        const RenderPlan plan =
+            BuildRenderPlan(db, ImageRgba8(64, 32, 0x808080FFu), {region}, options);
+        EXPECT(plan.fitted_regions == 1u);
+        EXPECT(plan.fast_regions == 0u);
+        EXPECT(plan.quality_regions == 1u);
+        EXPECT(plan.escalated_regions == 1u);
+    }
+
     std::cout << "\n────────────────────────────────\n";
     std::cout << "Passed: " << g_passed << "\n";
     std::cout << "Failed: " << g_failed << "\n";

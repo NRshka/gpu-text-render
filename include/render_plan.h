@@ -10,6 +10,12 @@
 
 namespace fac {
 
+enum class PlannerProfile
+{
+    Quality,
+    Adaptive,
+};
+
 struct ImageRgba8;
 
 struct RenderBatch
@@ -26,10 +32,14 @@ struct RenderPlan
     std::size_t overflowed_regions = 0;
     std::size_t unplaced_regions  = 0;
     std::size_t total_glyphs      = 0;
+    std::size_t fast_regions      = 0;
+    std::size_t quality_regions   = 0;
+    std::size_t escalated_regions = 0;
 };
 
 struct RenderPlanOptions
 {
+    PlannerProfile profile = PlannerProfile::Quality;
     TextFitOptions fit;
     bool align_lines = false;
     bool resolve_overlaps = true;
@@ -56,5 +66,12 @@ RenderPlan BuildRenderPlan(const FontDatabase& db,
                            const ImageRgba8& image,
                            const std::vector<TextRegion>& regions,
                            const RenderPlanOptions& options = {});
+
+RenderPlan BuildAdaptiveRenderPlan(const FontDatabase& db,
+                                   uint32_t width,
+                                   uint32_t height,
+                                   const std::vector<uint8_t>& image_luma,
+                                   const std::vector<TextRegion>& regions,
+                                   const RenderPlanOptions& options = {});
 
 } // namespace fac

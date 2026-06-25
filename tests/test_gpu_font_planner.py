@@ -97,6 +97,19 @@ class GpuRenderPlannerTests(unittest.TestCase):
         self.assertGreater(len(command_bytes), 0)
         self.assertGreater(len(batch_bytes), 0)
 
+    def test_plan_accepts_explicit_profile(self) -> None:
+        command_bytes, batch_bytes = self.planner.plan(
+            self.image,
+            self.texts,
+            self.polygons,
+            profile="quality",
+        )
+
+        self.assertIsInstance(command_bytes, bytes)
+        self.assertIsInstance(batch_bytes, bytes)
+        self.assertGreater(len(command_bytes), 0)
+        self.assertGreater(len(batch_bytes), 0)
+
     def test_validation_rejects_bad_inputs(self) -> None:
         with self.assertRaises(ValueError):
             self.planner.plan(np.zeros((100, 100, 3), dtype=np.uint8), self.texts, self.polygons)
@@ -121,6 +134,14 @@ class GpuRenderPlannerTests(unittest.TestCase):
                 self.texts,
                 self.polygons,
                 rgba=[0xFFFFFFFF, 0x11223344],
+            )
+
+        with self.assertRaises(ValueError):
+            self.planner.plan(
+                self.image,
+                self.texts,
+                self.polygons,
+                profile="invalid",
             )
 
 
