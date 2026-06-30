@@ -40,7 +40,8 @@ void FillPolygonRegionData(
     const std::vector<std::string>& texts,
     const std::vector<std::vector<std::array<float, 2>>>& polygons,
     const std::vector<std::string>& original_texts,
-    const py::object& rgba_obj)
+    const py::object& rgba_obj,
+    const py::object& cluster_ids_obj)
 {
     if (texts.size() != polygons.size())
         throw py::value_error("texts and polygons must have the same number of regions");
@@ -71,15 +72,30 @@ void FillPolygonRegionData(
     {
         out.region_has_rgba.assign(region_count, 0u);
         out.region_rgba.assign(region_count, 0u);
-        return;
+    }
+    else
+    {
+        const std::vector<uint32_t> rgba = rgba_obj.cast<std::vector<uint32_t>>();
+        if (rgba.size() != region_count)
+            throw py::value_error("rgba must match texts length when provided");
+
+        out.region_has_rgba.assign(region_count, 1u);
+        out.region_rgba = rgba;
     }
 
-    const std::vector<uint32_t> rgba = rgba_obj.cast<std::vector<uint32_t>>();
-    if (rgba.size() != region_count)
-        throw py::value_error("rgba must match texts length when provided");
+    if (cluster_ids_obj.is_none())
+        return;
 
-    out.region_has_rgba.assign(region_count, 1u);
-    out.region_rgba = rgba;
+    const std::vector<int32_t> cluster_ids =
+        cluster_ids_obj.cast<std::vector<int32_t>>();
+    if (cluster_ids.size() != region_count)
+        throw py::value_error("cluster_ids must match texts length when provided");
+    for (int32_t cluster_id : cluster_ids)
+    {
+        if (cluster_id < -1)
+            throw py::value_error("cluster_ids values must be >= -1");
+    }
+    out.region_cluster_ids = cluster_ids;
 }
 
 std::vector<uint8_t> BuildLumaFromRgb(
@@ -145,7 +161,8 @@ public:
         const std::vector<std::vector<std::array<float, 2>>>& polygons,
         const py::object& original_texts_obj,
         const py::object& rgba_obj,
-        const std::string& profile) const
+        const std::string& profile,
+        const py::object& cluster_ids_obj) const
     {
         try
         {
@@ -154,7 +171,12 @@ public:
             const fac::PlannerProfile planner_profile = ParsePlannerProfile(profile);
 
             fac::PolygonRegionTensorData region_data;
-            FillPolygonRegionData(region_data, texts, polygons, original_texts, rgba_obj);
+            FillPolygonRegionData(region_data,
+                                  texts,
+                                  polygons,
+                                  original_texts,
+                                  rgba_obj,
+                                  cluster_ids_obj);
 
             std::vector<uint8_t> luma = BuildLumaFromRgb(image_rgb);
 
@@ -211,5 +233,6 @@ PYBIND11_MODULE(gpu_font_planner, m)
              py::arg("polygons"),
              py::arg("original_texts") = py::none(),
              py::arg("rgba") = py::none(),
-             py::arg("profile") = "adaptive");
+             py::arg("profile") = "adaptive",
+             py::arg("cluster_ids") = py::none());
 }

@@ -21,6 +21,7 @@ struct PolygonRegionTensorData
     std::vector<Vec2f> region_vertices;
     std::vector<uint8_t> region_has_rgba;
     std::vector<uint32_t> region_rgba;
+    std::vector<int32_t> region_cluster_ids;
 };
 
 struct RgbRenderRequest

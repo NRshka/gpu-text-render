@@ -99,9 +99,33 @@ int main()
         EXPECT(regions[0].has_polygon);
         EXPECT(regions[0].polygon.size() == 4u);
         EXPECT(!regions[0].has_explicit_rgba);
+        EXPECT(regions[0].cluster_id == TextRegion::kUnclustered);
         EXPECT(regions[1].polygon.size() == 3u);
         EXPECT(regions[1].has_explicit_rgba);
         EXPECT(regions[1].rgba == 0xAABBCCDDu);
+        EXPECT(regions[1].cluster_id == TextRegion::kUnclustered);
+    }
+
+    SECTION("Cluster ids are optional and map to text regions");
+    {
+        PolygonRegionTensorData data;
+        data.region_texts = {"a", "b", "c"};
+        data.region_original_texts = {"a", "b", "c"};
+        data.region_vertex_counts = {3, 3, 3};
+        data.region_vertices = {
+            {0.0f, 0.0f}, {1.0f, 0.0f}, {0.0f, 1.0f},
+            {2.0f, 0.0f}, {3.0f, 0.0f}, {2.0f, 1.0f},
+            {4.0f, 0.0f}, {5.0f, 0.0f}, {4.0f, 1.0f},
+        };
+        data.region_has_rgba = {0u, 0u, 0u};
+        data.region_rgba = {0u, 0u, 0u};
+        data.region_cluster_ids = {0, 0, -1};
+
+        const std::vector<TextRegion> regions = BuildTextRegionsFromPolygonTensorData(data);
+        EXPECT(regions.size() == 3u);
+        EXPECT(regions[0].cluster_id == 0u);
+        EXPECT(regions[1].cluster_id == 0u);
+        EXPECT(regions[2].cluster_id == TextRegion::kUnclustered);
     }
 
     SECTION("Mismatched tensor lengths are rejected");
@@ -113,6 +137,52 @@ int main()
         data.region_vertices = {{0.0f, 0.0f}, {1.0f, 0.0f}, {0.0f, 1.0f}};
         data.region_has_rgba = {};
         data.region_rgba = {0u};
+
+        bool threw = false;
+        try
+        {
+            (void)BuildTextRegionsFromPolygonTensorData(data);
+        }
+        catch (const std::runtime_error&)
+        {
+            threw = true;
+        }
+        EXPECT(threw);
+    }
+
+    SECTION("Mismatched cluster id length is rejected");
+    {
+        PolygonRegionTensorData data;
+        data.region_texts = {"a"};
+        data.region_original_texts = {"a"};
+        data.region_vertex_counts = {3};
+        data.region_vertices = {{0.0f, 0.0f}, {1.0f, 0.0f}, {0.0f, 1.0f}};
+        data.region_has_rgba = {0u};
+        data.region_rgba = {0u};
+        data.region_cluster_ids = {0, 1};
+
+        bool threw = false;
+        try
+        {
+            (void)BuildTextRegionsFromPolygonTensorData(data);
+        }
+        catch (const std::runtime_error&)
+        {
+            threw = true;
+        }
+        EXPECT(threw);
+    }
+
+    SECTION("Cluster ids less than minus one are rejected");
+    {
+        PolygonRegionTensorData data;
+        data.region_texts = {"a"};
+        data.region_original_texts = {"a"};
+        data.region_vertex_counts = {3};
+        data.region_vertices = {{0.0f, 0.0f}, {1.0f, 0.0f}, {0.0f, 1.0f}};
+        data.region_has_rgba = {0u};
+        data.region_rgba = {0u};
+        data.region_cluster_ids = {-2};
 
         bool threw = false;
         try

@@ -15,10 +15,21 @@ static void ValidateRegionCounts(const PolygonRegionTensorData& data)
     if (data.region_original_texts.size() != region_count
         || data.region_vertex_counts.size() != region_count
         || data.region_has_rgba.size() != region_count
-        || data.region_rgba.size() != region_count)
+        || data.region_rgba.size() != region_count
+        || (!data.region_cluster_ids.empty()
+            && data.region_cluster_ids.size() != region_count))
     {
         throw std::runtime_error(
             "BuildTextRegionsFromPolygonTensorData: region tensor lengths must match");
+    }
+
+    for (int32_t cluster_id : data.region_cluster_ids)
+    {
+        if (cluster_id < -1)
+        {
+            throw std::runtime_error(
+                "BuildTextRegionsFromPolygonTensorData: region_cluster_ids values must be >= -1");
+        }
     }
 
     std::size_t total_vertices = 0;
@@ -139,6 +150,8 @@ std::vector<TextRegion> BuildTextRegionsFromPolygonTensorData(
         TextRegion region;
         region.text = text;
         region.original_text = original_text;
+        if (!data.region_cluster_ids.empty() && data.region_cluster_ids[i] >= 0)
+            region.cluster_id = (std::size_t)data.region_cluster_ids[i];
         region.has_polygon = true;
         region.polygon.assign(data.region_vertices.begin() + (std::ptrdiff_t)vertex_offset,
                               data.region_vertices.begin()

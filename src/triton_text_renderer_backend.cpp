@@ -35,6 +35,7 @@ constexpr const char* kInputVertexCountsName = "region_vertex_counts";
 constexpr const char* kInputVerticesName = "region_vertices";
 constexpr const char* kInputHasRgbaName = "region_has_rgba";
 constexpr const char* kInputRgbaName = "region_rgba";
+constexpr const char* kInputClusterIdsName = "region_cluster_ids";
 constexpr const char* kOutputImageName = "rendered_image";
 
 #define RETURN_IF_ERROR(EXPR)            \
@@ -603,22 +604,38 @@ TRITONSERVER_Error* BuildRegionTensorData(TRITONBACKEND_Request* request,
     {
         data.region_has_rgba.assign(region_count, 0u);
         data.region_rgba.assign(region_count, 0u);
-        return nullptr;
+    }
+    else
+    {
+        if (optional_shape.size() != 1 || optional_shape[0] < 0)
+        {
+            return BackendError(TRITONSERVER_ERROR_INVALID_ARG,
+                                "region_has_rgba must have shape [N]");
+        }
+        if (shape.size() != 1 || shape[0] < 0)
+        {
+            return BackendError(TRITONSERVER_ERROR_INVALID_ARG,
+                                "region_rgba must have shape [N]");
+        }
+
+        data.region_has_rgba = has_rgba_raw;
+        data.region_rgba = ReinterpretBytes<uint32_t>(rgba_raw);
     }
 
-    if (optional_shape.size() != 1 || optional_shape[0] < 0)
-    {
-        return BackendError(TRITONSERVER_ERROR_INVALID_ARG,
-                            "region_has_rgba must have shape [N]");
-    }
+    bool cluster_ids_present = false;
+    std::vector<uint8_t> cluster_ids_raw;
+    RETURN_IF_ERROR(TryReadOptionalNumericTensor(
+        request, kInputClusterIdsName, TRITONSERVER_TYPE_INT32,
+        cluster_ids_present, cluster_ids_raw, &shape));
+    if (!cluster_ids_present)
+        return nullptr;
+
     if (shape.size() != 1 || shape[0] < 0)
     {
         return BackendError(TRITONSERVER_ERROR_INVALID_ARG,
-                            "region_rgba must have shape [N]");
+                            "region_cluster_ids must have shape [N]");
     }
-
-    data.region_has_rgba = has_rgba_raw;
-    data.region_rgba = ReinterpretBytes<uint32_t>(rgba_raw);
+    data.region_cluster_ids = ReinterpretBytes<int32_t>(cluster_ids_raw);
     return nullptr;
 }
 

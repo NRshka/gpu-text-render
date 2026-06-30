@@ -39,6 +39,12 @@ input [
     data_type: TYPE_UINT32
     dims: [ -1 ]
     optional: true
+  },
+  {
+    name: "region_cluster_ids"
+    data_type: TYPE_INT32
+    dims: [ -1 ]
+    optional: true
   }
 ]
 
