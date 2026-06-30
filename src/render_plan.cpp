@@ -1681,6 +1681,79 @@ static void ApplyLineAlignment(std::vector<PlannedRegion>& planned,
     }
 }
 
+static bool IsClustered(const PlannedRegion& region) noexcept
+{
+    return region.region != nullptr
+        && region.region->cluster_id != TextRegion::kUnclustered;
+}
+
+static float PlannedLineHeight(const PlannedRegion& region) noexcept
+{
+    if (!region.valid)
+        return 0.0f;
+    return region.IsCurved() ? region.curve_fit.line_height : region.fit.line_height;
+}
+
+static void ScalePlannedRegion(PlannedRegion& region,
+                               const RenderPlanOptions& options,
+                               float scale_factor) noexcept
+{
+    if (region.IsCurved())
+        ScaleCurveFit(region.geometry.curve,
+                      region.measurement,
+                      options.fit,
+                      scale_factor,
+                      region.curve_fit);
+    else
+        ScaleFit(region.geometry.box,
+                 region.measurement,
+                 options.fit,
+                 scale_factor,
+                 region.fit);
+}
+
+static void ScalePlannedRegionToLineHeight(PlannedRegion& region,
+                                           const RenderPlanOptions& options,
+                                           float target_line_height) noexcept
+{
+    const float current = PlannedLineHeight(region);
+    if (!(current > 0.0f) || !(target_line_height > 0.0f))
+        return;
+    ScalePlannedRegion(region, options, std::min(1.0f, target_line_height / current));
+}
+
+static void ApplyClusterInitialSizing(std::vector<PlannedRegion>& planned,
+                                      const RenderPlanOptions& options)
+{
+    for (std::size_t i = 0; i < planned.size(); ++i)
+    {
+        if (!planned[i].valid || !IsClustered(planned[i]))
+            continue;
+
+        const std::size_t cluster_id = planned[i].region->cluster_id;
+        std::vector<std::size_t> group;
+        float target_line_height = std::numeric_limits<float>::infinity();
+
+        for (std::size_t j = i; j < planned.size(); ++j)
+        {
+            if (!planned[j].valid || !IsClustered(planned[j])
+                || planned[j].region->cluster_id != cluster_id)
+            {
+                continue;
+            }
+
+            group.push_back(j);
+            target_line_height = std::min(target_line_height, PlannedLineHeight(planned[j]));
+        }
+
+        if (group.size() < 2 || !std::isfinite(target_line_height))
+            continue;
+
+        for (std::size_t index : group)
+            ScalePlannedRegionToLineHeight(planned[index], options, target_line_height);
+    }
+}
+
 static Vec2f GeometryAnchor(const PlannedRegion& region) noexcept
 {
     if (!region.IsCurved())
@@ -2063,96 +2136,107 @@ static PlacementCandidate MakeCurveCandidate(const PlannedRegion& region,
     return candidate;
 }
 
+static PlacementCandidate ResolveOverflowPlacementAtScale(
+    const PlannedRegion& region,
+    const RenderPlanOptions& options,
+    const std::vector<PlacedFootprint>& placed,
+    float scale_factor)
+{
+    const std::vector<float> tangent_fracs =
+        BuildOffsetFractions(options.candidate_tangent_steps);
+    const std::vector<float> normal_fracs =
+        BuildOffsetFractions(options.candidate_normal_steps);
+
+    PlacementCandidate best_at_scale;
+
+    if (region.IsCurved())
+    {
+        CurveFitResult scaled = region.curve_fit;
+        ScaleCurveFit(region.geometry.curve,
+                      region.measurement,
+                      options.fit,
+                      scale_factor,
+                      scaled);
+        if (!scaled.IsValid() || scaled.line_height < options.min_line_height_px)
+            return best_at_scale;
+
+        const float tangent_budget = EffectiveTangentOverflow(scaled, options);
+        const float normal_budget = EffectiveNormalOverflow(region.geometry.curve, options);
+        for (float tangent_frac : tangent_fracs)
+        {
+            for (float normal_frac : normal_fracs)
+            {
+                CurveFitResult candidate_fit = scaled;
+                const float tangent_delta = tangent_frac * tangent_budget;
+                const float normal_delta = normal_frac * normal_budget;
+                ShiftCurveFit(candidate_fit, tangent_delta, normal_delta);
+                PlacementCandidate candidate = MakeCurveCandidate(region,
+                                                                  options,
+                                                                  placed,
+                                                                  candidate_fit,
+                                                                  tangent_delta,
+                                                                  normal_delta);
+                if (BetterCandidateAtSameScale(candidate, best_at_scale))
+                    best_at_scale = candidate;
+            }
+        }
+    }
+    else
+    {
+        TextFitResult scaled = region.fit;
+        ScaleFit(region.geometry.box,
+                 region.measurement,
+                 options.fit,
+                 scale_factor,
+                 scaled);
+        if (!scaled.IsValid() || scaled.line_height < options.min_line_height_px)
+            return best_at_scale;
+
+        const float tangent_budget = EffectiveTangentOverflow(region.geometry.box, options);
+        const float normal_budget = EffectiveNormalOverflow(region.geometry.box, options);
+        for (float tangent_frac : tangent_fracs)
+        {
+            for (float normal_frac : normal_fracs)
+            {
+                TextFitResult candidate_fit = scaled;
+                const float tangent_delta = tangent_frac * tangent_budget;
+                const float normal_delta = normal_frac * normal_budget;
+                ShiftFit(candidate_fit, tangent_delta, normal_delta);
+                PlacementCandidate candidate = MakeStraightCandidate(region,
+                                                                     options,
+                                                                     placed,
+                                                                     candidate_fit,
+                                                                     tangent_delta,
+                                                                     normal_delta);
+                if (BetterCandidateAtSameScale(candidate, best_at_scale))
+                    best_at_scale = candidate;
+            }
+        }
+    }
+
+    return best_at_scale;
+}
+
 static PlacementCandidate ResolveOverflowPlacement(const PlannedRegion& region,
                                                    const RenderPlanOptions& options,
                                                    const std::vector<PlacedFootprint>& placed)
 {
     PlacementCandidate best_any;
-    const std::vector<float> tangent_fracs =
-        BuildOffsetFractions(options.candidate_tangent_steps);
-    const std::vector<float> normal_fracs =
-        BuildOffsetFractions(options.candidate_normal_steps);
     float scale_factor = 1.0f;
 
     while (true)
     {
-        PlacementCandidate best_at_scale;
-
-        if (region.IsCurved())
-        {
-            CurveFitResult scaled = region.curve_fit;
-            ScaleCurveFit(region.geometry.curve,
-                          region.measurement,
-                          options.fit,
-                          scale_factor,
-                          scaled);
-            if (!scaled.IsValid() || scaled.line_height < options.min_line_height_px)
-                break;
-
-            const float tangent_budget = EffectiveTangentOverflow(scaled, options);
-            const float normal_budget = EffectiveNormalOverflow(region.geometry.curve, options);
-            for (float tangent_frac : tangent_fracs)
-            {
-                for (float normal_frac : normal_fracs)
-                {
-                    CurveFitResult candidate_fit = scaled;
-                    const float tangent_delta = tangent_frac * tangent_budget;
-                    const float normal_delta = normal_frac * normal_budget;
-                    ShiftCurveFit(candidate_fit, tangent_delta, normal_delta);
-                    PlacementCandidate candidate = MakeCurveCandidate(region,
-                                                                      options,
-                                                                      placed,
-                                                                      candidate_fit,
-                                                                      tangent_delta,
-                                                                      normal_delta);
-                    if (BetterCandidateAtSameScale(candidate, best_any))
-                        best_any = candidate;
-                    if (BetterCandidateAtSameScale(candidate, best_at_scale))
-                        best_at_scale = candidate;
-                }
-            }
-        }
-        else
-        {
-            TextFitResult scaled = region.fit;
-            ScaleFit(region.geometry.box,
-                     region.measurement,
-                     options.fit,
-                     scale_factor,
-                     scaled);
-            if (!scaled.IsValid() || scaled.line_height < options.min_line_height_px)
-                break;
-
-            const float tangent_budget = EffectiveTangentOverflow(region.geometry.box, options);
-            const float normal_budget = EffectiveNormalOverflow(region.geometry.box, options);
-            for (float tangent_frac : tangent_fracs)
-            {
-                for (float normal_frac : normal_fracs)
-                {
-                    TextFitResult candidate_fit = scaled;
-                    const float tangent_delta = tangent_frac * tangent_budget;
-                    const float normal_delta = normal_frac * normal_budget;
-                    ShiftFit(candidate_fit, tangent_delta, normal_delta);
-                    PlacementCandidate candidate = MakeStraightCandidate(region,
-                                                                         options,
-                                                                         placed,
-                                                                         candidate_fit,
-                                                                         tangent_delta,
-                                                                         normal_delta);
-                    if (BetterCandidateAtSameScale(candidate, best_any))
-                        best_any = candidate;
-                    if (BetterCandidateAtSameScale(candidate, best_at_scale))
-                        best_at_scale = candidate;
-                }
-            }
-        }
-
+        PlacementCandidate best_at_scale =
+            ResolveOverflowPlacementAtScale(region, options, placed, scale_factor);
+        if (BetterCandidateAtSameScale(best_at_scale, best_any))
+            best_any = best_at_scale;
         if (best_at_scale.valid)
             return best_at_scale;
-
-        scale_factor *= options.scale_step_factor;
+        if (PlannedLineHeight(region) * scale_factor < options.min_line_height_px)
+            break;
         if (!(options.scale_step_factor > 0.0f) || !(options.scale_step_factor < 1.0f))
             break;
+        scale_factor *= options.scale_step_factor;
     }
 
     if (!options.skip_if_unplaceable && best_any.valid)
@@ -2219,6 +2303,178 @@ static TextFitResult ResolveOverlaps(const PlannedRegion& region,
     return fallback;
 }
 
+static AcceptedPlacement MakeAcceptedPlacementFromCandidate(
+    const PlannedRegion& entry,
+    PlacementCandidate placement)
+{
+    AcceptedPlacement accepted;
+    if (!placement.valid || placement.glyphs.empty())
+        return accepted;
+
+    accepted.valid = true;
+    accepted.overflowed = placement.overflowed;
+    accepted.is_curved = entry.IsCurved();
+    accepted.render_size = entry.IsCurved()
+        ? placement.curve_fit.atlas->render_size
+        : placement.fit.atlas->render_size;
+    accepted.commands = std::move(placement.glyphs);
+    if (!entry.IsCurved())
+        accepted.placed_box =
+            MakePlacedBox(entry.geometry.box, placement.fit, entry.measurement);
+    accepted.footprint.overflowed = accepted.overflowed;
+    accepted.footprint.quads = std::move(placement.quads);
+    return accepted;
+}
+
+static AcceptedPlacement MakeAcceptedPlacement(PlannedRegion& entry,
+                                               PlacementCandidate placement)
+{
+    if (entry.IsCurved())
+        entry.curve_fit = placement.curve_fit;
+    else
+        entry.fit = placement.fit;
+    return MakeAcceptedPlacementFromCandidate(entry, std::move(placement));
+}
+
+static AcceptedPlacement TryAcceptPlannedQualityRegion(
+    PlannedRegion& entry,
+    const RenderPlanOptions& options,
+    const std::vector<OrientedBox>& placed_boxes,
+    const std::vector<PlacedFootprint>& placed_footprints)
+{
+    AcceptedPlacement accepted;
+    if (!entry.valid)
+        return accepted;
+
+    if (options.allow_overflow)
+    {
+        return MakeAcceptedPlacement(
+            entry,
+            ResolveOverflowPlacement(entry, options, placed_footprints));
+    }
+
+    if (entry.IsCurved())
+    {
+        if (!entry.curve_fit.IsValid() || entry.curve_fit.atlas == nullptr)
+            return accepted;
+
+        accepted.commands = LayoutTextOnCurve(*entry.curve_fit.atlas,
+                                              entry.region->text,
+                                              entry.geometry.curve,
+                                              entry.curve_fit,
+                                              entry.resolved_rgba);
+        accepted.render_size = entry.curve_fit.atlas->render_size;
+        accepted.footprint.quads = BuildGlyphQuads(*entry.curve_fit.atlas, accepted.commands);
+    }
+    else
+    {
+        if (!entry.fit.IsValid() || entry.fit.atlas == nullptr)
+            return accepted;
+
+        entry.fit = ResolveOverlaps(entry, options, placed_boxes);
+        if (!entry.fit.IsValid())
+            return accepted;
+
+        accepted.commands = BuildStraightGlyphs(entry, entry.fit);
+        accepted.render_size = entry.fit.atlas->render_size;
+        accepted.placed_box = MakePlacedBox(entry.geometry.box, entry.fit, entry.measurement);
+        accepted.footprint.quads = BuildGlyphQuads(*entry.fit.atlas, accepted.commands);
+    }
+
+    if (accepted.commands.empty())
+        return AcceptedPlacement{};
+
+    accepted.valid = true;
+    accepted.overflowed = false;
+    accepted.is_curved = entry.IsCurved();
+    accepted.footprint.overflowed = false;
+    return accepted;
+}
+
+static bool TryAcceptClusterAtScale(
+    const std::vector<PlannedRegion*>& group,
+    const RenderPlanOptions& options,
+    const std::vector<PlacedFootprint>& placed_footprints,
+    float scale_factor,
+    std::vector<AcceptedPlacement>& out)
+{
+    out.clear();
+    std::vector<PlacedFootprint> attempt_footprints = placed_footprints;
+    out.reserve(group.size());
+
+    for (PlannedRegion* entry : group)
+    {
+        PlacementCandidate candidate =
+            ResolveOverflowPlacementAtScale(*entry, options, attempt_footprints, scale_factor);
+        if (!candidate.valid)
+            return false;
+
+        AcceptedPlacement accepted =
+            MakeAcceptedPlacementFromCandidate(*entry, std::move(candidate));
+        if (!accepted.valid)
+            return false;
+
+        attempt_footprints.push_back(accepted.footprint);
+        out.push_back(std::move(accepted));
+    }
+
+    return true;
+}
+
+static std::vector<AcceptedPlacement> TryAcceptClusteredQualityRegions(
+    const std::vector<PlannedRegion*>& group,
+    const RenderPlanOptions& options,
+    const std::vector<PlacedFootprint>& placed_footprints)
+{
+    std::vector<AcceptedPlacement> accepted;
+    if (group.empty())
+        return accepted;
+
+    std::vector<AcceptedPlacement> best_partial;
+    float scale_factor = 1.0f;
+
+    while (true)
+    {
+        std::vector<AcceptedPlacement> attempt;
+        if (TryAcceptClusterAtScale(group,
+                                    options,
+                                    placed_footprints,
+                                    scale_factor,
+                                    attempt))
+        {
+            return attempt;
+        }
+
+        if (!options.skip_if_unplaceable && attempt.size() > best_partial.size())
+            best_partial = std::move(attempt);
+
+        float next_line_height = std::numeric_limits<float>::infinity();
+        for (const PlannedRegion* entry : group)
+            next_line_height = std::min(next_line_height,
+                                        PlannedLineHeight(*entry)
+                                            * scale_factor
+                                            * options.scale_step_factor);
+        if (next_line_height < options.min_line_height_px)
+            break;
+
+        scale_factor *= options.scale_step_factor;
+        if (!(options.scale_step_factor > 0.0f) || !(options.scale_step_factor < 1.0f))
+            break;
+    }
+
+    return best_partial;
+}
+
+static bool HasClusteredRegions(const std::vector<TextRegion>& regions) noexcept
+{
+    for (const TextRegion& region : regions)
+    {
+        if (region.cluster_id != TextRegion::kUnclustered)
+            return true;
+    }
+    return false;
+}
+
 } // namespace
 
 static RenderPlan BuildQualityRenderPlanInternal(const FontDatabase& db,
@@ -2237,6 +2493,7 @@ static RenderPlan BuildQualityRenderPlanInternal(const FontDatabase& db,
 
     if (options.align_lines)
         ApplyLineAlignment(planned, options);
+    ApplyClusterInitialSizing(planned, options);
 
     if (options.allow_overflow)
         std::sort(planned.begin(), planned.end(), PlannedRegionLess);
@@ -2246,115 +2503,80 @@ static RenderPlan BuildQualityRenderPlanInternal(const FontDatabase& db,
     placed_boxes.reserve(regions.size());
     std::vector<PlacedFootprint> placed_footprints;
     placed_footprints.reserve(regions.size());
+    std::vector<bool> processed(planned.size(), false);
 
-    for (PlannedRegion& entry : planned)
+    for (std::size_t index = 0; index < planned.size(); ++index)
     {
+        if (processed[index])
+            continue;
+
+        PlannedRegion& entry = planned[index];
         if (!entry.valid)
         {
+            processed[index] = true;
             ++plan.unplaced_regions;
             continue;
         }
 
-        std::vector<RenderGlyph> commands;
-        uint32_t render_size = 0;
-        bool overflowed = false;
-
-        if (options.allow_overflow)
+        if (IsClustered(entry))
         {
-            const PlacementCandidate placement =
-                ResolveOverflowPlacement(entry, options, placed_footprints);
-            if (!placement.valid)
+            const std::size_t cluster_id = entry.region->cluster_id;
+            std::vector<PlannedRegion*> group;
+            std::vector<std::size_t> group_indices;
+            for (std::size_t j = index; j < planned.size(); ++j)
             {
-                ++plan.unplaced_regions;
+                if (processed[j] || !planned[j].valid || !IsClustered(planned[j])
+                    || planned[j].region->cluster_id != cluster_id)
+                {
+                    continue;
+                }
+
+                group.push_back(&planned[j]);
+                group_indices.push_back(j);
+            }
+
+            for (std::size_t group_index : group_indices)
+                processed[group_index] = true;
+
+            if (group.size() > 1)
+            {
+                std::vector<AcceptedPlacement> accepted =
+                    TryAcceptClusteredQualityRegions(group, options, placed_footprints);
+                if (accepted.size() != group.size() && options.skip_if_unplaceable)
+                {
+                    plan.unplaced_regions += group.size();
+                    continue;
+                }
+
+                for (AcceptedPlacement& placement : accepted)
+                {
+                    ++plan.quality_regions;
+                    AppendPlacement(plan,
+                                    batch_by_size,
+                                    placement,
+                                    placed_boxes,
+                                    placed_footprints);
+                }
+
+                if (accepted.size() < group.size())
+                    plan.unplaced_regions += group.size() - accepted.size();
                 continue;
             }
-
-            commands = placement.glyphs;
-            overflowed = placement.overflowed;
-            render_size = entry.IsCurved()
-                ? placement.curve_fit.atlas->render_size
-                : placement.fit.atlas->render_size;
-
-            if (entry.IsCurved())
-                entry.curve_fit = placement.curve_fit;
-            else
-                entry.fit = placement.fit;
-
-            PlacedFootprint footprint;
-            footprint.overflowed = placement.overflowed;
-            footprint.quads = placement.quads;
-            placed_footprints.push_back(std::move(footprint));
-        }
-        else
-        {
-            if (entry.IsCurved())
-            {
-                if (!entry.curve_fit.IsValid() || entry.curve_fit.atlas == nullptr)
-                {
-                    ++plan.unplaced_regions;
-                    continue;
-                }
-
-                commands = LayoutTextOnCurve(*entry.curve_fit.atlas,
-                                             entry.region->text,
-                                             entry.geometry.curve,
-                                             entry.curve_fit,
-                                             entry.resolved_rgba);
-                render_size = entry.curve_fit.atlas->render_size;
-            }
-            else
-            {
-                if (!entry.fit.IsValid() || entry.fit.atlas == nullptr)
-                {
-                    ++plan.unplaced_regions;
-                    continue;
-                }
-
-                entry.fit = ResolveOverlaps(entry, options, placed_boxes);
-                if (!entry.fit.IsValid())
-                {
-                    ++plan.unplaced_regions;
-                    continue;
-                }
-
-                const std::vector<GlyphPlacement> placements =
-                    LayoutTextLine(*entry.fit.atlas, entry.region->text, entry.fit);
-                commands.reserve(placements.size());
-                for (const GlyphPlacement& placement : placements)
-                {
-                    commands.push_back(
-                        MakeRenderGlyph(placement, entry.geometry.box, entry.resolved_rgba));
-                }
-                render_size = entry.fit.atlas->render_size;
-            }
         }
 
-        if (commands.empty())
+        processed[index] = true;
+        AcceptedPlacement placement = TryAcceptPlannedQualityRegion(entry,
+                                                                    options,
+                                                                    placed_boxes,
+                                                                    placed_footprints);
+        if (!placement.valid)
         {
             ++plan.unplaced_regions;
             continue;
         }
 
-        auto [it, inserted] = batch_by_size.emplace(render_size, plan.batches.size());
-        if (inserted)
-        {
-            RenderBatch batch;
-            batch.atlas_render_size = render_size;
-            plan.batches.push_back(std::move(batch));
-        }
-
-        RenderBatch& batch = plan.batches[it->second];
-        batch.glyphs.reserve(batch.glyphs.size() + commands.size());
-        batch.glyphs.insert(batch.glyphs.end(), commands.begin(), commands.end());
-
-        if (!entry.IsCurved())
-            placed_boxes.push_back(MakePlacedBox(entry.geometry.box, entry.fit, entry.measurement));
-
-        ++plan.fitted_regions;
         ++plan.quality_regions;
-        if (overflowed)
-            ++plan.overflowed_regions;
-        plan.total_glyphs += commands.size();
+        AppendPlacement(plan, batch_by_size, placement, placed_boxes, placed_footprints);
     }
 
     return plan;
@@ -2504,7 +2726,7 @@ RenderPlan BuildRenderPlan(const FontDatabase& db,
                            const std::vector<TextRegion>& regions,
                            const RenderPlanOptions& options)
 {
-    if (options.profile == PlannerProfile::Adaptive)
+    if (options.profile == PlannerProfile::Adaptive && !HasClusteredRegions(regions))
         return BuildAdaptiveRenderPlanInternal(db, image, regions, options);
     return BuildQualityRenderPlanInternal(db, image, regions, options);
 }
@@ -2516,7 +2738,11 @@ RenderPlan BuildAdaptiveRenderPlan(const FontDatabase& db,
                                    const std::vector<TextRegion>& regions,
                                    const RenderPlanOptions& options)
 {
-    return BuildAdaptiveRenderPlanFromLumaInternal(db, width, height, image_luma, regions, options);
+    if (!HasClusteredRegions(regions))
+        return BuildAdaptiveRenderPlanFromLumaInternal(db, width, height, image_luma, regions, options);
+
+    const ImageRgba8 brightness_image = BuildBrightnessImageFromLuma(width, height, image_luma);
+    return BuildQualityRenderPlanInternal(db, brightness_image, regions, options);
 }
 
 } // namespace fac

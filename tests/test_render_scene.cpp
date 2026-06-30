@@ -154,6 +154,55 @@ int main()
         EXPECT(!scene.regions[0].has_curve);
     }
 
+    SECTION("Clustered region arrays flatten with stable cluster ids");
+    {
+        const fs::path dir = fs::temp_directory_path() / "gpu_font_rendering_tests";
+        fs::create_directories(dir);
+
+        const fs::path json_path = dir / "scene_clustered.json";
+        std::ofstream f(json_path);
+        if (!f)
+            throw std::runtime_error("Cannot open " + json_path.string());
+
+        f << R"({
+            "image": "img.png",
+            "regions": [
+                [
+                    {
+                        "text": "a",
+                        "original_text": "a",
+                        "polygon": [[0, 0], [20, 0], [20, 10], [0, 10]]
+                    },
+                    {
+                        "text": "b",
+                        "original_text": "b",
+                        "polygon": [[30, 0], [50, 0], [50, 16], [30, 16]]
+                    }
+                ],
+                [
+                    {
+                        "text": "c",
+                        "original_text": "c",
+                        "polygon": [[0, 20], [20, 20], [20, 30], [0, 30]]
+                    }
+                ],
+                {
+                    "text": "d",
+                    "original_text": "d",
+                    "polygon": [[30, 20], [50, 20], [50, 30], [30, 30]]
+                }
+            ]
+        })";
+        f.close();
+
+        const RenderScene scene = LoadRenderSceneJson(json_path);
+        EXPECT(scene.regions.size() == 4u);
+        EXPECT(scene.regions[0].cluster_id == 0u);
+        EXPECT(scene.regions[1].cluster_id == 0u);
+        EXPECT(scene.regions[2].cluster_id == 1u);
+        EXPECT(scene.regions[3].cluster_id == TextRegion::kUnclustered);
+    }
+
     SECTION("Curve-only region loads");
     {
         const fs::path dir = fs::temp_directory_path() / "gpu_font_rendering_tests";

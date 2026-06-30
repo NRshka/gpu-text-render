@@ -1,7 +1,9 @@
 #pragma once
 
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -154,8 +156,12 @@ struct OrientedBox
 
 struct TextRegion
 {
+    static constexpr std::size_t kUnclustered =
+        std::numeric_limits<std::size_t>::max();
+
     std::string text;
     std::string original_text;
+    std::size_t cluster_id = kUnclustered;
     OrientedBox box;
     std::vector<Vec2f> polygon;
     CurvedTextPath curve;

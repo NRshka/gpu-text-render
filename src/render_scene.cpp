@@ -161,6 +161,51 @@ static CurvedTextPath ParseCurve(const json& curve_json)
     return curve;
 }
 
+static TextRegion ParseRegionObject(const json& region_json, std::size_t cluster_id)
+{
+    if (!region_json.is_object())
+        throw std::runtime_error("RenderScene: each region must be an object");
+
+    auto text_it = region_json.find("text");
+    if (text_it == region_json.end() || !text_it->is_string())
+        throw std::runtime_error("RenderScene: region missing 'text' string");
+
+    auto original_text_it = region_json.find("original_text");
+    if (original_text_it == region_json.end() || !original_text_it->is_string())
+        throw std::runtime_error("RenderScene: region missing 'original_text' string");
+
+    TextRegion region;
+    region.text = text_it->get<std::string>();
+    region.original_text = original_text_it->get<std::string>();
+    region.cluster_id = cluster_id;
+    region.has_explicit_rgba = TryReadUint32(region_json, "rgba", region.rgba);
+
+    auto polygon_it = region_json.find("polygon");
+    if (polygon_it != region_json.end())
+    {
+        region.polygon = ParsePolygon(*polygon_it);
+        region.has_polygon = true;
+    }
+
+    auto curve_it = region_json.find("curve");
+    if (curve_it != region_json.end())
+    {
+        region.curve = ParseCurve(*curve_it);
+        region.has_curve = true;
+    }
+
+    if (TryReadBoxObject(region_json, region.box))
+    {
+    }
+    else if (!region.has_curve && !region.has_polygon)
+    {
+        throw std::runtime_error(
+            "RenderScene: region must contain 'curve', 'polygon', or 'obb'");
+    }
+
+    return region;
+}
+
 } // namespace
 
 RenderScene LoadRenderSceneJson(const std::filesystem::path& json_path)
@@ -187,48 +232,24 @@ RenderScene LoadRenderSceneJson(const std::filesystem::path& json_path)
     scene.image_path = json_path.parent_path() / image_it->get<std::string>();
     scene.regions.reserve(regions_it->size());
 
-    for (const auto& region_json : *regions_it)
+    std::size_t cluster_id = 0;
+    for (const auto& item_json : *regions_it)
     {
-        if (!region_json.is_object())
-            throw std::runtime_error("RenderScene: each region must be an object");
-
-        auto text_it = region_json.find("text");
-        if (text_it == region_json.end() || !text_it->is_string())
-            throw std::runtime_error("RenderScene: region missing 'text' string");
-
-        auto original_text_it = region_json.find("original_text");
-        if (original_text_it == region_json.end() || !original_text_it->is_string())
-            throw std::runtime_error("RenderScene: region missing 'original_text' string");
-
-        TextRegion region;
-        region.text = text_it->get<std::string>();
-        region.original_text = original_text_it->get<std::string>();
-        region.has_explicit_rgba = TryReadUint32(region_json, "rgba", region.rgba);
-
-        auto polygon_it = region_json.find("polygon");
-        if (polygon_it != region_json.end())
+        if (item_json.is_object())
         {
-            region.polygon = ParsePolygon(*polygon_it);
-            region.has_polygon = true;
+            scene.regions.push_back(ParseRegionObject(
+                item_json,
+                TextRegion::kUnclustered));
+            continue;
         }
 
-        auto curve_it = region_json.find("curve");
-        if (curve_it != region_json.end())
-        {
-            region.curve = ParseCurve(*curve_it);
-            region.has_curve = true;
-        }
-
-        if (TryReadBoxObject(region_json, region.box))
-        {
-        }
-        else if (!region.has_curve && !region.has_polygon)
-        {
+        if (!item_json.is_array())
             throw std::runtime_error(
-                "RenderScene: region must contain 'curve', 'polygon', or 'obb'");
-        }
+                "RenderScene: each regions entry must be a region object or an array of region objects");
 
-        scene.regions.push_back(std::move(region));
+        for (const auto& region_json : item_json)
+            scene.regions.push_back(ParseRegionObject(region_json, cluster_id));
+        ++cluster_id;
     }
 
     return scene;

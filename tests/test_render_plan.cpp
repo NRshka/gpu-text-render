@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -459,6 +460,74 @@ int main()
         const float aligned_diff =
             std::fabs(EffectiveLineHeight(db, aligned[0]) - EffectiveLineHeight(db, aligned[1]));
         EXPECT(aligned_diff < loose_diff);
+    }
+
+    SECTION("Clustered regions share initial line height");
+    {
+        TextRegion small;
+        small.text = "A";
+        small.original_text = "A";
+        small.cluster_id = 0u;
+        small.box.cx = 16.0f;
+        small.box.cy = 12.0f;
+        small.box.width = 20.0f;
+        small.box.height = 10.0f;
+
+        TextRegion large = small;
+        large.cluster_id = 0u;
+        large.box.cx = 48.0f;
+        large.box.height = 20.0f;
+
+        const std::vector<std::pair<uint32_t, RenderGlyph>> glyphs =
+            CollectGlyphs(BuildRenderPlan(db, ImageRgba8(72, 32, 0x000000FFu), {small, large}));
+
+        EXPECT(glyphs.size() == 2u);
+        EXPECT_NEAR(EffectiveLineHeight(db, glyphs[0]),
+                    EffectiveLineHeight(db, glyphs[1]),
+                    1e-5f);
+    }
+
+    SECTION("Clustered overflow shrink keeps sibling line heights equal");
+    {
+        TextRegion narrow;
+        narrow.text = "A A A A A";
+        narrow.original_text = "A A A A A";
+        narrow.cluster_id = 1u;
+        narrow.box.cx = 20.0f;
+        narrow.box.cy = 16.0f;
+        narrow.box.width = 14.0f;
+        narrow.box.height = 20.0f;
+
+        TextRegion sibling;
+        sibling.text = "A";
+        sibling.original_text = "A";
+        sibling.cluster_id = 1u;
+        sibling.box.cx = 56.0f;
+        sibling.box.cy = 16.0f;
+        sibling.box.width = 20.0f;
+        sibling.box.height = 20.0f;
+
+        RenderPlanOptions options;
+        options.min_line_height_px = 2.0f;
+
+        const std::vector<std::pair<uint32_t, RenderGlyph>> glyphs =
+            CollectGlyphs(BuildRenderPlan(db,
+                                          ImageRgba8(80, 32, 0x000000FFu),
+                                          {narrow, sibling},
+                                          options));
+
+        EXPECT(glyphs.size() == 10u);
+        float min_height = std::numeric_limits<float>::infinity();
+        float max_height = 0.0f;
+        for (const auto& glyph : glyphs)
+        {
+            const float height = EffectiveLineHeight(db, glyph);
+            min_height = std::min(min_height, height);
+            max_height = std::max(max_height, height);
+        }
+
+        EXPECT(max_height < 20.0f);
+        EXPECT_NEAR(min_height, max_height, 1e-4f);
     }
 
     SECTION("Rectangle polygon falls back to straight layout");
