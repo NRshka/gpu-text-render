@@ -17,6 +17,8 @@ constexpr float kLineAngleThresholdDeg = 10.0f;
 constexpr float kBrightnessThreshold = 128.0f;
 constexpr float kStraightCurveDeviationPx = 4.0f;
 constexpr float kCurveSampleStepPx = 6.0f;
+constexpr float kVisualFitHeightFill = 0.90f;
+constexpr float kVisualFitFontHeightFloor = 0.65f;
 constexpr int kMinCurveSamplesPerSegment = 16;
 
 enum class GeometryKind
@@ -211,6 +213,14 @@ static const AtlasEntry* SelectAtlasForHeight(const FontDatabase& db,
     return fallback;
 }
 
+static float VisualFitHeight(const AtlasEntry& atlas,
+                             const TextMeasurement& measurement) noexcept
+{
+    const float font_floor =
+        (float)atlas.font_height_px * kVisualFitFontHeightFloor;
+    return std::max(measurement.ink_height, font_floor);
+}
+
 static TextFitOptions MakeFitOptions(const RenderPlanOptions& options) noexcept
 {
     return options.fit;
@@ -241,7 +251,7 @@ static void RecenterFit(const OrientedBox& box,
     const float local_top  = -0.5f * box.height + options.padding_y;
 
     fit.text_width = measurement.width * fit.scale;
-    fit.line_height = (float)fit.atlas->font_height_px * fit.scale;
+    fit.line_height = VisualFitHeight(*fit.atlas, measurement) * fit.scale;
 
     if (options.horizontal_align == HorizontalAlign::Left)
         fit.start_x = local_left;
@@ -279,7 +289,7 @@ static void RecenterCurveFit(const CurvedTextPath& curve,
     const float inner_h = std::max(0.0f, curve.band_height - 2.0f * options.padding_y);
 
     fit.text_width = measurement.width * fit.scale;
-    fit.line_height = (float)fit.atlas->font_height_px * fit.scale;
+    fit.line_height = VisualFitHeight(*fit.atlas, measurement) * fit.scale;
 
     if (options.horizontal_align == HorizontalAlign::Left)
         fit.start_offset = options.padding_x;
@@ -328,7 +338,8 @@ static TextFitResult MakeReadableFit(const FontDatabase& db,
         return fit;
 
     fit.atlas = atlas;
-    fit.scale = inner_h / (float)atlas->font_height_px;
+    fit.scale =
+        (inner_h * kVisualFitHeightFill) / VisualFitHeight(*atlas, measurement);
     if (options.max_scale > 0.0f)
         fit.scale = std::min(fit.scale, options.max_scale);
     if (!(fit.scale > 0.0f))
@@ -360,7 +371,8 @@ static CurveFitResult MakeReadableCurveFit(const FontDatabase& db,
         return fit;
 
     fit.atlas = atlas;
-    fit.scale = inner_h / (float)atlas->font_height_px;
+    fit.scale =
+        (inner_h * kVisualFitHeightFill) / VisualFitHeight(*atlas, measurement);
     if (options.max_scale > 0.0f)
         fit.scale = std::min(fit.scale, options.max_scale);
     if (!(fit.scale > 0.0f))

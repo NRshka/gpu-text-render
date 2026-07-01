@@ -172,15 +172,17 @@ int main()
         TextRegion large;
         large.text = u8"აა";
         large.original_text = u8"აა";
-        large.box.cx = 20.0f;
-        large.box.cy = 20.0f;
+        large.box.cx = 48.0f;
+        large.box.cy = 48.0f;
         large.box.width = 20.0f;
         large.box.height = 20.0f;
         large.rgba = 0xFF0000FFu;
         regions.push_back(large);
 
-        const ImageRgba8 base(32, 32, 0x000000FFu);
-        const RenderPlan plan = BuildRenderPlan(db, base, regions);
+        const ImageRgba8 base(72, 72, 0x000000FFu);
+        RenderPlanOptions options;
+        options.min_line_height_px = 2.0f;
+        const RenderPlan plan = BuildRenderPlan(db, base, regions, options);
         EXPECT(plan.total_regions == 2u);
         EXPECT(plan.fitted_regions == 2u);
         EXPECT(plan.total_glyphs == 4u);
@@ -558,19 +560,19 @@ int main()
         polygon_region.has_polygon = true;
         polygon_region.polygon = {
             Vec2f{8.0f, 8.0f},
-            Vec2f{40.0f, 8.0f},
-            Vec2f{40.0f, 20.0f},
-            Vec2f{22.0f, 20.0f},
+            Vec2f{48.0f, 8.0f},
+            Vec2f{48.0f, 24.0f},
+            Vec2f{28.0f, 24.0f},
             Vec2f{8.0f, 12.0f},
         };
 
         TextRegion box_region;
         box_region.text = polygon_region.text;
         box_region.original_text = polygon_region.original_text;
-        box_region.box.cx = 24.0f;
-        box_region.box.cy = 14.0f;
-        box_region.box.width = 32.0f;
-        box_region.box.height = 12.0f;
+        box_region.box.cx = 28.0f;
+        box_region.box.cy = 16.0f;
+        box_region.box.width = 40.0f;
+        box_region.box.height = 16.0f;
 
         const std::vector<std::pair<uint32_t, RenderGlyph>> polygon_glyphs =
             CollectGlyphs(BuildRenderPlan(db, ImageRgba8(64, 32, 0x000000FFu), {polygon_region}));

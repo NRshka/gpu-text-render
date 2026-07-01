@@ -10,6 +10,8 @@ namespace {
 
 constexpr float kCurveSampleStepPx = 6.0f;
 constexpr int kMinCurveSamplesPerSegment = 16;
+constexpr float kVisualFitHeightFill = 0.90f;
+constexpr float kVisualFitFontHeightFloor = 0.65f;
 
 struct CurveSample
 {
@@ -107,6 +109,14 @@ const AtlasEntry* SelectAtlasForHeight(const FontDatabase& db,
     }
 
     return fallback;
+}
+
+static float VisualFitHeight(const AtlasEntry& atlas,
+                             const TextMeasurement& measurement) noexcept
+{
+    const float font_floor =
+        (float)atlas.font_height_px * kVisualFitFontHeightFloor;
+    return std::max(measurement.ink_height, font_floor);
 }
 
 static Vec2f EvaluateBezier(const CubicBezierSegment& segment, float t) noexcept
@@ -349,7 +359,8 @@ TextFitResult FitTextToBox(const FontDatabase& db,
     const float width_scale = (m.width > 0.0f)
         ? (inner_w / m.width)
         : std::numeric_limits<float>::infinity();
-    const float height_scale = inner_h / (float)atlas->font_height_px;
+    const float visual_fit_h = VisualFitHeight(*atlas, m);
+    const float height_scale = (inner_h * kVisualFitHeightFill) / visual_fit_h;
     float scale = std::min(width_scale, height_scale);
     if (options.max_scale > 0.0f)
         scale = std::min(scale, options.max_scale);
@@ -358,7 +369,7 @@ TextFitResult FitTextToBox(const FontDatabase& db,
         return out;
 
     const float scaled_width = m.width * scale;
-    const float scaled_line_h = (float)atlas->font_height_px * scale;
+    const float scaled_line_h = visual_fit_h * scale;
 
     const float local_left = -0.5f * box.width + options.padding_x;
     const float local_top  = -0.5f * box.height + options.padding_y;
@@ -407,7 +418,8 @@ CurveFitResult FitTextToCurve(const FontDatabase& db,
     const float width_scale = (m.width > 0.0f)
         ? (inner_w / m.width)
         : std::numeric_limits<float>::infinity();
-    const float height_scale = inner_h / (float)atlas->font_height_px;
+    const float visual_fit_h = VisualFitHeight(*atlas, m);
+    const float height_scale = (inner_h * kVisualFitHeightFill) / visual_fit_h;
     float scale = std::min(width_scale, height_scale);
     if (options.max_scale > 0.0f)
         scale = std::min(scale, options.max_scale);
@@ -417,7 +429,7 @@ CurveFitResult FitTextToCurve(const FontDatabase& db,
     out.atlas = atlas;
     out.scale = scale;
     out.text_width = m.width * scale;
-    out.line_height = (float)atlas->font_height_px * scale;
+    out.line_height = visual_fit_h * scale;
     out.curve_length = inner_w + 2.0f * options.padding_x;
 
     if (options.horizontal_align == HorizontalAlign::Left)

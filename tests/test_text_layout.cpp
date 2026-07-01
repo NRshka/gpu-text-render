@@ -116,6 +116,7 @@ int main()
         EXPECT_NEAR(m.advance_width, 16.0f, 1e-6f);
         EXPECT_NEAR(m.ascent, 9.0f, 1e-6f);
         EXPECT_NEAR(m.descent, 1.0f, 1e-6f);
+        EXPECT_NEAR(m.ink_height, 10.0f, 1e-6f);
     }
 
     SECTION("Center fit and layout");
@@ -129,17 +130,17 @@ int main()
         EXPECT(fit.atlas == atlas);
         EXPECT_NEAR(fit.scale, 1.25f, 1e-6f);
         EXPECT_NEAR(fit.start_x, -10.0f, 1e-6f);
-        EXPECT_NEAR(fit.baseline_y, 3.75f, 1e-6f);
+        EXPECT_NEAR(fit.baseline_y, 5.0f, 1e-6f);
         EXPECT_NEAR(fit.text_width, 20.0f, 1e-6f);
-        EXPECT_NEAR(fit.line_height, 15.0f, 1e-6f);
+        EXPECT_NEAR(fit.line_height, 12.5f, 1e-6f);
 
         const std::vector<GlyphPlacement> placements =
             LayoutTextLine(*atlas, "AB", fit);
         EXPECT(placements.size() == 2u);
         EXPECT_NEAR(placements[0].local_x, -10.0f, 1e-6f);
-        EXPECT_NEAR(placements[0].local_y, -7.5f, 1e-6f);
+        EXPECT_NEAR(placements[0].local_y, -6.25f, 1e-6f);
         EXPECT_NEAR(placements[1].local_x, 2.5f, 1e-6f);
-        EXPECT_NEAR(placements[1].local_y, -5.0f, 1e-6f);
+        EXPECT_NEAR(placements[1].local_y, -3.75f, 1e-6f);
     }
 
     SECTION("Left/top alignment and render transform");
@@ -163,7 +164,7 @@ int main()
         const TextFitResult fit = FitTextToBox(db, "A B", box, options);
         EXPECT(fit.IsValid());
         EXPECT_NEAR(fit.start_x, -18.0f, 1e-6f);
-        EXPECT_NEAR(fit.baseline_y, 4.5f, 1e-6f);
+        EXPECT_NEAR(fit.baseline_y, 5.58f, 1e-5f);
 
         const std::vector<GlyphPlacement> placements =
             LayoutTextLine(*atlas, "A B", fit);
@@ -197,7 +198,7 @@ int main()
         const CurveFitResult fit = FitTextToCurve(db, "AB", curve);
         EXPECT(fit.IsValid());
         EXPECT(fit.atlas == atlas);
-        EXPECT_NEAR(fit.scale, 20.0f / 12.0f, 1e-4f);
+        EXPECT_NEAR(fit.scale, 1.8f, 1e-4f);
         EXPECT_NEAR(fit.start_offset, (40.0f - 16.0f * fit.scale) * 0.5f, 1e-4f);
 
         const std::vector<RenderGlyph> glyphs =
